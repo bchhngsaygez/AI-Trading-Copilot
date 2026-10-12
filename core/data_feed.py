@@ -132,26 +132,9 @@ class MarketDataFeed:
         self.circuit_break_until = time.time() + self.circuit_break_duration
         logger.error(f"KÍCH HOẠT CIRCUIT BREAKER! Tạm dừng request tới Binance trong {self.circuit_break_duration}s.")
 
-    def fetch_ohlcv_binance_direct(self, symbol: str, timeframe: str, limit: int = 100) -> List[Candle]:
-        """Gọi trực tiếp endpoint công khai của Binance nếu CCXT không hoạt động"""
-        clean_symbol = symbol.replace("/", "").replace(":USDT", "")
-        base_url = "https://fapi.binance.com/fapi/v1/klines" if self.use_futures else "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": clean_symbol,
-            "interval": timeframe,
-            "limit": limit
-        }
-
-        resp = requests.get(base_url, params=params, timeout=5.0)
-        if resp.status_code == 429:
-            self._trigger_circuit_breaker()
-            raise RuntimeError("HTTP 429 Too Many Requests từ Binance API!")
-        resp.raise_for_status()
-
-        data = resp.json()
+    def _parse_binance_klines(self, data: list) -> List[Candle]:
         candles = []
         for row in data:
-            # Binance kline format: [Open time, Open, High, Low, Close, Volume, ...]
             candles.append(Candle(
                 timestamp=int(row[0]),
                 open=float(row[1]),
@@ -161,6 +144,81 @@ class MarketDataFeed:
                 volume=float(row[5])
             ))
         return candles
+
+    def _parse_bybit_klines(self, raw_list: list) -> List[Candle]:
+        candles = []
+        # Bybit trả về từ nến mới nhất tới cũ nhất -> Đảo ngược lại theo thứ tự thời gian tăng dần
+        for row in reversed(raw_list):
+            candles.append(Candle(
+                timestamp=int(row[0]),
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5])
+            ))
+        return candles
+
+    def fetch_ohlcv_direct(self, symbol: str, timeframe: str, limit: int = 100) -> List[Candle]:
+        """
+        Kéo nến đa kênh với cơ chế tự động chuyển vùng khi bị Cloud WAF chặn (HTTP 418 Teapot):
+        1. data-api.binance.vision (Binance official mirror không chặn Cloudflare IP)
+        2. api.bybit.com (Bybit linear perpetual klines - Không bị chặn trên Render/AWS)
+        3. api.binance.com (Binance Spot)
+        4. fapi.binance.com (Binance Futures)
+        """
+        clean_symbol = symbol.replace("/", "").replace(":USDT", "").upper()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        # 1. Thử Binance Vision Public Data Mirror (Khắc phục triệt để lỗi 418 trên Render)
+        try:
+            url = "https://data-api.binance.vision/api/v3/klines"
+            params = {"symbol": clean_symbol, "interval": timeframe, "limit": limit}
+            resp = requests.get(url, params=params, headers=headers, timeout=4.0)
+            if resp.status_code == 200:
+                return self._parse_binance_klines(resp.json())
+        except Exception as e:
+            logger.debug(f"data-api.binance.vision lỗi: {e}")
+
+        # 2. Thử Bybit Public API (Hỗ trợ 100% cloud hostings, không chặn IP server)
+        try:
+            bybit_tf_map = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+            bybit_tf = bybit_tf_map.get(timeframe, "15")
+            bybit_url = "https://api.bybit.com/v5/market/kline"
+            bybit_params = {"category": "linear", "symbol": clean_symbol, "interval": bybit_tf, "limit": limit}
+            resp = requests.get(bybit_url, params=bybit_params, headers=headers, timeout=4.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("retCode") == 0 and "list" in data.get("result", {}):
+                    return self._parse_bybit_klines(data["result"]["list"])
+        except Exception as e:
+            logger.debug(f"api.bybit.com lỗi: {e}")
+
+        # 3. Thử Binance Spot Public API
+        try:
+            url = "https://api.binance.com/api/v3/klines"
+            params = {"symbol": clean_symbol, "interval": timeframe, "limit": limit}
+            resp = requests.get(url, params=params, headers=headers, timeout=4.0)
+            if resp.status_code == 200:
+                return self._parse_binance_klines(resp.json())
+        except Exception as e:
+            logger.debug(f"api.binance.com lỗi: {e}")
+
+        # 4. Thử Binance Futures (nếu không dính WAF Teapot)
+        try:
+            url = "https://fapi.binance.com/fapi/v1/klines"
+            params = {"symbol": clean_symbol, "interval": timeframe, "limit": limit}
+            resp = requests.get(url, params=params, headers=headers, timeout=4.0)
+            if resp.status_code == 200:
+                return self._parse_binance_klines(resp.json())
+        except Exception as e:
+            logger.debug(f"fapi.binance.com lỗi: {e}")
+
+        raise RuntimeError(f"Tất cả các nguồn dữ liệu công khai (Binance Vision, Bybit, Binance Spot) đều không phản hồi cho {symbol}")
 
     def fetch_candles_with_backoff(
         self, symbol: str, timeframe: str, limit: int = 100, max_retries: int = 3
@@ -192,10 +250,10 @@ class MarketDataFeed:
                         self.consecutive_errors = 0
                         return candles
                     except Exception as ccxt_err:
-                        logger.debug(f"CCXT fetch lỗi, chuyển sang Direct REST: {ccxt_err}")
+                        logger.debug(f"CCXT fetch lỗi, chuyển sang Direct Multi-Tier Endpoints: {ccxt_err}")
 
-                # 2. Gọi qua Direct REST API
-                candles = self.fetch_ohlcv_binance_direct(symbol, timeframe, limit=limit)
+                # 2. Gọi qua Direct Multi-Tier Endpoints (Binance Vision / Bybit / Spot)
+                candles = self.fetch_ohlcv_direct(symbol, timeframe, limit=limit)
                 self.consecutive_errors = 0
                 return candles
 
