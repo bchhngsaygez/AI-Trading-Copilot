@@ -1,0 +1,72 @@
+# ==============================================================================
+# HỆ THỐNG AI TRADING COPILOT & DETERMINISTIC RISK MANAGEMENT ENGINE
+# Cấu hình hệ thống (settings.yaml)
+# ==============================================================================
+
+account:
+  equity_usd: 200.00           # Vốn khả dụng ban đầu ($200.00)
+  fixed_risk_percent: 1.0       # Tỷ lệ rủi ro cố định cho mỗi lệnh (1.0% = $2.00)
+  max_open_positions: 2         # Giới hạn tối đa 2 vị thế đồng thời
+
+guardrails:
+  daily_loss_limit_usd: 4.00    # Ngưỡng ngắt mạch dừng giao dịch trong ngày (2.0% vốn = $4.00)
+  anti_tilt_consecutive_losses: 2 # Số lệnh SL liên tiếp kích hoạt thời gian làm nguội
+  cooldown_minutes: 60          # Thời gian dừng quét khi dính 2 SL liên tiếp
+  breakeven_trigger_r: 1.0      # Ngưỡng đôn SL về hòa vốn khi đạt 1.0R lợi nhuận ($2.00)
+
+strategy:
+  symbols:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+  timeframes:
+    entry: "15m"                # Khung vào lệnh & tính ATR
+    trend: "1h"                 # Khung xu hướng trung hạn (EMA200)
+    macro: "4h"                 # Khung xu hướng vĩ mô
+  ring_buffer_size: 300         # Kích thước bộ đệm nến Ring Buffer
+
+risk_math:
+  atr_period: 14                # Chu kỳ ATR thích ứng
+  sl_buffer_atr_mult: 1.2       # Khoảng đệm ATR cho Stop Loss (1.2 * ATR)
+  min_sl_distance_atr_mult: 1.0 # Ngưỡng khoảng cách SL tối thiểu
+  forced_sl_atr_mult: 1.5       # Mức cưỡng chế giãn SL tránh quét râu (1.5 * ATR)
+  min_risk_reward: 2.0          # Tỷ lệ R:R tối thiểu để chấp thuận đề xuất
+  scale_out:
+    tp1_r: 1.5                  # Chốt 50% khối lượng, dời SL về Breakeven
+    tp1_percent: 50
+    tp2_r: 2.5                  # Chốt 30% khối lượng
+    tp2_percent: 30
+    tp3_r: 4.0                  # Thả trôi 20% còn lại với Trailing Stop
+    tp3_percent: 20
+
+indicators:
+  rsi_lengths: [10, 14, 30]     # RSI Multi-length
+  rsi_oversold: 30.0            # Ngưỡng quá bán
+  rsi_overbought: 70.0          # Ngưỡng quá mua
+  ema_fast: 50
+  ema_slow: 200
+  swing_window: 5               # Cửa sổ n nến quét Swing High / Low
+  trendline_break_margin: 0.002 # Biên độ xác nhận phá vỡ đường xu hướng (0.2%)
+
+llm:
+  provider: "ollama"            # "ollama" | "openrouter" | "deterministic_fallback"
+  ollama:
+    base_url: "http://localhost:11434/api/generate"
+    model: "qwen2.5-coder:7b"   # Hoặc deepseek-r1:latest
+    timeout_seconds: 5.0
+  openrouter:
+    api_key: ""
+    model: "deepseek/deepseek-r1"
+    base_url: "https://openrouter.ai/api/v1/chat/completions"
+  deterministic_fallback_enabled: true # Luôn sẵn sàng phản biện nếu LLM ngoại tuyến
+
+alerts:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+  desktop_sound: false
+  cli_color: true
+
+storage:
+  database_path: "storage/trades.db"

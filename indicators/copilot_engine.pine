@@ -1,0 +1,208 @@
+//@version=6
+indicator("AI Trading Copilot & Deterministic Risk Engine [TradePilot]", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ==============================================================================
+// 1. CẤU HÌNH THAM SỐ HỆ THỐNG (SETTINGS & DETERMINISTIC RISK)
+// ==============================================================================
+grp_acc   = "1. Quản Trị Vốn & Rủi Ro Cố Định"
+equity    = input.float(200.0, "Vốn Khả Dụng ($ USD)", group=grp_acc, minval=1.0)
+riskPerc  = input.float(1.0, "Rủi Ro Mỗi Lệnh (%)", group=grp_acc, minval=0.1, step=0.1)
+
+grp_risk  = "2. Tầng Toán Học Xác Định (Adaptive SL & TP)"
+atrLen    = input.int(14, "Chu kỳ ATR 15m", group=grp_risk)
+slMult    = input.float(1.2, "Đệm Stop Loss (x ATR)", group=grp_risk, step=0.1)
+minSlMult = input.float(1.5, "Cưỡng Chế Giãn SL Tối Thiểu (x ATR)", group=grp_risk, step=0.1)
+rrRatio   = input.float(2.0, "Tỷ Lệ Risk/Reward Tối Thiểu", group=grp_risk, minval=1.5, step=0.5)
+
+grp_strat = "3. Chỉ Báo Định Lượng & Dual Tracking Line"
+pivotLen  = input.int(5, "Độ dài Swing Pivot (LuxAlgo)", group=grp_strat)
+breakMargin = input.float(0.002, "Biên Độ Xác Nhận Breakout (0.2%)", group=grp_strat, step=0.0005)
+trackPeriod = input.int(21, "Chu Kỳ Đường Tracking Thứ 2", group=grp_strat)
+trackOffset = input.float(1.1, "Khoảng Cách Đệm Tracking Dưới (x ATR)", group=grp_strat)
+
+grp_ai    = "4. Tầng Phản Biện Rủi Ro (Devil's Advocate)"
+showPanel = input.bool(true, "Hiển Thị Hộp Phản Biện AI (On-Chart Table)", group=grp_ai)
+showSignals = input.bool(true, "Hiển Thị Nhãn Tín Hiệu Buy/Sell", group=grp_ai)
+
+// ==============================================================================
+// 2. TÍNH TOÁN CHỈ BÁO ĐỊNH LƯỢNG (TIER 2 QUANT ENGINE)
+// ==============================================================================
+// ATR Thích Ứng
+atrVal = ta.atr(atrLen)
+
+// RSI Multi-Length
+rsi10 = ta.rsi(close, 10)
+rsi14 = ta.rsi(close, 14)
+rsi30 = ta.rsi(close, 30)
+isExtremeOversold   = rsi10 < 30.0 and rsi14 < 30.0 and rsi30 < 30.0
+isExtremeOverbought = rsi10 > 70.0 and rsi14 > 70.0 and rsi30 > 70.0
+
+// EMA Khung Xu Hướng
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// LuxAlgo-equivalent Pivot Swing Detection
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pivotLow  = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+if not na(pivotLow)
+    lastSwingLow  := pivotLow
+
+// LuxAlgo Trendline Break Confirmation (0.2% margin)
+bullishBreak = not na(lastSwingHigh) and (close > lastSwingHigh * (1.0 + breakMargin)) and (close[1] <= lastSwingHigh * (1.0 + breakMargin))
+bearishBreak = not na(lastSwingLow)  and (close < lastSwingLow  * (1.0 - breakMargin)) and (close[1] >= lastSwingLow  * (1.0 - breakMargin))
+
+// ==============================================================================
+// 3. MAIN INDICATOR & SECOND TRACKING LINE BENEATH (DUAL TRACKING SETUP)
+// ==============================================================================
+// Đường chỉ báo chính (Main Dynamic Trendline / Base Line)
+mainTrendLine = ta.ema(close, 13)
+
+// ĐƯỜNG CHỈ BÁO THỨ HAI (SECOND INDICATOR LINE BENEATH MAIN INDICATOR)
+// Chạy mượt mà bên dưới đường chính, bám sát hành động giá theo thời gian thực
+// Hoạt động tương tự setup chuẩn trên TraderPilotAI / LuxAlgo
+secondTrackingLine = ta.ema(low, trackPeriod) - (trackOffset * atrVal * 0.5)
+
+// Đánh giá trạng thái xu hướng của cặp đường
+isBullishTrack = close > mainTrendLine and mainTrendLine > secondTrackingLine
+isBearishTrack = close < mainTrendLine
+
+// Màu sắc động phản ánh nhịp thị trường
+mainColor  = isBullishTrack ? color.new(#10B981, 0) : (isBearishTrack ? color.new(#EF4444, 0) : color.new(#F59E0B, 0))
+trackColor = isBullishTrack ? color.new(#3B82F6, 10) : (isBearishTrack ? color.new(#DC2626, 10) : color.new(#6B7280, 10))
+
+// Vẽ đường chỉ báo chính
+p_main = plot(mainTrendLine, "1. Main Indicator Trendline", color=mainColor, linewidth=2)
+
+// Vẽ đường chỉ báo thứ hai bám sát bên dưới trong thời gian thực
+p_track = plot(secondTrackingLine, "2. Secondary Tracking Line (Beneath)", color=trackColor, linewidth=2, style=plot.style_linebr)
+
+// Đổ dải mây động (Tracking Ribbon Cloud) giữa đường chính và đường thứ hai
+fill(p_main, p_track, 
+     color=isBullishTrack ? color.new(#3B82F6, 85) : color.new(#EF4444, 90), 
+     title="AI Dynamic Tracking Cloud")
+
+// ==============================================================================
+// 4. BỘ LỌC CẢNH SÁT RỦI RO (HARD VETO RULES & CHIEF RISK OFFICER)
+// ==============================================================================
+// VETO 1: Ngược xu hướng vĩ mô (Giá dưới EMA200 đang dốc xuống)
+ema200SlopeDown = ema200 < ema200[5]
+veto1_BuyViolated  = (close < ema200) and ema200SlopeDown
+veto1_SellViolated = (close > ema200) and (not ema200SlopeDown)
+
+// VETO 2: Thác nước xả nến (Waterfall Falling Knife - 3 nến đỏ dốc đứng không rút râu)
+isRed0 = close[0] < open[0] and (open[0] - close[0]) > (high[0] - low[0]) * 0.6
+isRed1 = close[1] < open[1] and (open[1] - close[1]) > (high[1] - low[1]) * 0.6
+isRed2 = close[2] < open[2] and (open[2] - close[2]) > (high[2] - low[2]) * 0.6
+isPinbarBullish = (math.min(open, close) - low) > (math.abs(close - open) * 1.8)
+veto2_WaterfallViolated = (isRed0 and isRed1 and isRed2) and (not isPinbarBullish)
+
+// Điều kiện kích hoạt tín hiệu Mua / Bán
+rawBuySignal  = (bullishBreak or isExtremeOversold or isPinbarBullish) and not bearishBreak
+rawSellSignal = (bearishBreak or isExtremeOverbought) and not bullishBreak
+
+// Phán quyết của Tầng AI (APPROVE nếu không dính VETO và cấu trúc thuyết phục)
+aiBuyApproved  = rawBuySignal and (not veto1_BuyViolated) and (not veto2_WaterfallViolated)
+aiSellApproved = rawSellSignal and (not veto1_SellViolated)
+
+// Quyết định VETO từ chối
+aiVetoBuyRejected  = rawBuySignal and (veto1_BuyViolated or veto2_WaterfallViolated)
+aiVetoSellRejected = rawSellSignal and veto1_SellViolated
+
+// ==============================================================================
+// 5. TÍNH TOÁN TOÁN HỌC VỊ THẾ & SCALE-OUT (DETERMINISTIC MATH)
+// ==============================================================================
+fixedRiskUSD = equity * (riskPerc / 100.0)
+
+// Vị thế Mua (Long)
+slBufferLong = slMult * atrVal
+rawSLLong    = not na(lastSwingLow) ? (lastSwingLow - slBufferLong) : (close - slBufferLong)
+var float slLong = na
+var float tp1Long = na
+var float tp2Long = na
+var float tp3Long = na
+var float qtyLong = na
+
+if aiBuyApproved or aiVetoBuyRejected
+    slDist = close - rawSLLong
+    // Cưỡng chế giãn SL nếu khoảng cách < 1.0 ATR
+    if slDist < (1.0 * atrVal)
+        slDist := minSlMult * atrVal
+        slLong := close - slDist
+    else
+        slLong := rawSLLong
+
+    slDistTotal = math.max(close - slLong, 0.01)
+    qtyLong  := fixedRiskUSD / slDistTotal
+    tp1Long  := close + (1.5 * slDistTotal)
+    tp2Long  := close + (2.5 * slDistTotal)
+    tp3Long  := close + (4.0 * slDistTotal)
+
+// ==============================================================================
+// 6. HIỂN THỊ NHÃN TÍN HIỆU TRÊN BIỂU ĐỒ (BUY / SELL LABELS)
+// ==============================================================================
+if showSignals and aiBuyApproved and not aiBuyApproved[1]
+    label.new(bar_index, low - atrVal * 0.3, 
+              text="BUY LIMIT\n" + "Entry: " + str.tostring(close, "#.##") + "\nSL: " + str.tostring(slLong, "#.##") + "\nSize: " + str.tostring(qtyLong, "#.####") + "\n[AI: APPROVED]", 
+              color=color.new(#10B981, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if showSignals and aiVetoBuyRejected and not aiVetoBuyRejected[1]
+    reasonStr = veto1_BuyViolated ? "VETO 1 (Under 1h EMA200)" : "VETO 2 (Falling Knife)"
+    label.new(bar_index, low - atrVal * 0.3, 
+              text="BUY REJECTED\n" + reasonStr + "\n[DEVIL'S ADVOCATE]", 
+              color=color.new(#EF4444, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if showSignals and aiSellApproved and not aiSellApproved[1]
+    label.new(bar_index, high + atrVal * 0.3, 
+              text="SELL LIMIT\n" + "Entry: " + str.tostring(close, "#.##") + "\n[AI: APPROVED]", 
+              color=color.new(#EF4444, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// ==============================================================================
+// 7. HỘP BÌNH LUẬN & BẢNG PHẢN BIỆN AI REAL-TIME (COMMENTARY PANEL)
+// ==============================================================================
+var table aiTable = table.new(position.top_right, 2, 7, bgcolor=color.new(#151922, 10), border_color=color.new(#232936, 0), border_width=1)
+
+if showPanel and barstate.islast
+    // Header
+    table.cell(aiTable, 0, 0, "AI TRADING COPILOT", bgcolor=color.new(#3B82F6, 30), text_color=color.white, text_size=size.small)
+    table.cell(aiTable, 1, 0, "RISK OFFICER v1.0", bgcolor=color.new(#3B82F6, 30), text_color=color.new(#93C5FD, 0), text_size=size.small)
+
+    // AI Status / Verdict
+    string verdictText = aiBuyApproved ? "APPROVE (BUY)" : (aiVetoBuyRejected ? "REJECT (VETO)" : (isBearishTrack ? "DEFENSIVE (BEAR)" : "STANDBY (SCAN)"))
+    color verdictColor = aiBuyApproved ? color.new(#10B981, 0) : (aiVetoBuyRejected ? color.new(#EF4444, 0) : color.new(#F59E0B, 0))
+    table.cell(aiTable, 0, 1, "Phán Quyết AI:", text_color=color.new(#9CA3AF, 0), text_size=size.small)
+    table.cell(aiTable, 1, 1, verdictText, text_color=verdictColor, text_size=size.small)
+
+    // Fixed Risk
+    table.cell(aiTable, 0, 2, "Rủi Ro Cố Định:", text_color=color.new(#9CA3AF, 0), text_size=size.small)
+    table.cell(aiTable, 1, 2, "$" + str.tostring(fixedRiskUSD, "#.##") + " USD (1.0%)", text_color=color.white, text_size=size.small)
+
+    // Multi-Length RSI
+    table.cell(aiTable, 0, 3, "RSI Multi-Length:", text_color=color.new(#9CA3AF, 0), text_size=size.small)
+    table.cell(aiTable, 1, 3, "10:" + str.tostring(rsi10, "#.#") + " | 14:" + str.tostring(rsi14, "#.#") + " | 30:" + str.tostring(rsi30, "#.#"), text_color=color.white, text_size=size.small)
+
+    // Adaptive ATR & Buffer
+    table.cell(aiTable, 0, 4, "ATR 15m / Đệm SL:", text_color=color.new(#9CA3AF, 0), text_size=size.small)
+    table.cell(aiTable, 1, 4, str.tostring(atrVal, "#.##") + " (Đệm: " + str.tostring(slMult, "#.#") + "x)", text_color=color.white, text_size=size.small)
+
+    // Dual Tracking State
+    table.cell(aiTable, 0, 5, "Tracking Line Dưới:", text_color=color.new(#9CA3AF, 0), text_size=size.small)
+    string trackState = isBullishTrack ? "Bám Đáy Tăng Trưởng" : (isBearishTrack ? "Cảnh Báo Áp Lực Bán" : "Chờ Xác Nhận Cấu Trúc")
+    table.cell(aiTable, 1, 5, trackState, text_color=isBullishTrack ? color.new(#10B981, 0) : color.new(#F87171, 0), text_size=size.small)
+
+    // Commentary Note
+    string commentary = aiVetoBuyRejected ? "Devil's Advocate: Nghiêm cấm bắt dao rơi / Đè gãy trendline" : (aiBuyApproved ? "Cấu trúc hỗ trợ vững, R:R 1:2.0 tối ưu" : "Bảo toàn vốn, chờ nến 15m đóng cửa xác nhận")
+    table.cell(aiTable, 0, 6, "Bình Luận CRO:", text_color=color.new(#9CA3AF, 0), text_size=size.small)
+    table.cell(aiTable, 1, 6, commentary, text_color=color.new(#FDE047, 0), text_size=size.small)
+
+// ==============================================================================
+// 8. CẢNH BÁO TỰ ĐỘNG (ALERTS)
+// ==============================================================================
+alertcondition(aiBuyApproved, "AI Buy Signal Approved", "AI Copilot: BUY Signal APPROVED. Entry: {{close}}")
+alertcondition(aiVetoBuyRejected, "AI Devil's Advocate VETO", "AI Copilot: BUY Signal REJECTED by Devil's Advocate VETO!")
+alertcondition(bullishBreak, "LuxAlgo Trendline Breakout", "AI Copilot: Bullish Trendline Breakout detected on {{ticker}}!")
+alertcondition(bearishBreak, "LuxAlgo Trendline Breakdown", "AI Copilot: Bearish Trendline Breakdown detected on {{ticker}}!")

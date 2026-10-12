@@ -1,0 +1,9 @@
+# AI Trading Copilot & Deterministic Risk Management Engine
+# Requirements Specification
+
+numpy>=1.26.0
+pandas>=2.2.0
+pyyaml>=6.0.1
+requests>=2.31.0
+ccxt>=4.2.0
+colorama>=0.4.6
