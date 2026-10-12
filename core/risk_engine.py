@@ -67,6 +67,13 @@ class DeterministicRiskEngine:
         # Rủi ro tối đa cố định: ví dụ $200 * 1% = $2.00 USD
         self.max_risk_usd = round(self.account_equity * (self.risk_percent / 100.0), 2)
 
+    def update_account_equity(self, equity: float, risk_percent: float = None):
+        """Cập nhật vốn tài khoản và tỷ lệ rủi ro động"""
+        self.account_equity = float(equity)
+        if risk_percent is not None:
+            self.risk_percent = float(risk_percent)
+        self.max_risk_usd = round(self.account_equity * (self.risk_percent / 100.0), 2)
+
     @staticmethod
     def get_symbol_precision(symbol: str) -> int:
         """Định dạng số chữ số thập phân phù hợp từng coin"""

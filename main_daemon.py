@@ -56,11 +56,16 @@ class TradingCopilotSystem:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.db = DatabaseManager(db_path=db_path)
 
+        # Đọc vốn và tỷ lệ rủi ro từ Database nếu có
+        saved_equity = self.db.get_account_equity(default=self.config.get("account", {}).get("equity_usd", 200.0))
+        saved_risk_pct = self.db.get_risk_percent(default=self.config.get("account", {}).get("fixed_risk_percent", 1.0))
+        daily_loss_limit = round(saved_equity * 0.02, 2)
+
         # 2. Khởi tạo Guardrails
         g_cfg = self.config.get("guardrails", {})
         self.guardrails = RiskGuardrails(
             db=self.db,
-            daily_loss_limit_usd=g_cfg.get("daily_loss_limit_usd", 4.00),
+            daily_loss_limit_usd=daily_loss_limit,
             max_open_positions=self.config.get("account", {}).get("max_open_positions", 2),
             breakeven_trigger_r=g_cfg.get("breakeven_trigger_r", 1.0),
             anti_tilt_consecutive_losses=g_cfg.get("anti_tilt_consecutive_losses", 2),
@@ -76,8 +81,8 @@ class TradingCopilotSystem:
         acc_cfg = self.config.get("account", {})
         risk_cfg = self.config.get("risk_math", {})
         self.risk_engine = DeterministicRiskEngine(
-            account_equity=acc_cfg.get("equity_usd", 200.0),
-            risk_percent=acc_cfg.get("fixed_risk_percent", 1.0),
+            account_equity=saved_equity,
+            risk_percent=saved_risk_pct,
             sl_buffer_mult=risk_cfg.get("sl_buffer_atr_mult", 1.2),
             forced_min_sl_mult=risk_cfg.get("forced_sl_atr_mult", 1.5),
             min_rr=risk_cfg.get("min_risk_reward", 2.0)
@@ -268,6 +273,15 @@ class TradingCopilotSystem:
 
     def run_scanner_cycle(self):
         """Chạy một chu kỳ quét tất cả các cặp trong watchlist"""
+        # 0. Đồng bộ cấu hình vốn & tỷ lệ rủi ro từ Database nếu người dùng đã cập nhật
+        current_equity = self.db.get_account_equity(default=self.risk_engine.account_equity)
+        current_risk_pct = self.db.get_risk_percent(default=self.risk_engine.risk_percent)
+        if current_equity != self.risk_engine.account_equity or current_risk_pct != self.risk_engine.risk_percent:
+            self.risk_engine.update_account_equity(current_equity, current_risk_pct)
+            new_daily_limit = round(current_equity * 0.02, 2)
+            self.guardrails.update_daily_loss_limit(new_daily_limit)
+            logger.info(f"Đã đồng bộ vốn mới: ${current_equity:,.2f} USD | Rủi ro: {current_risk_pct}% (${self.risk_engine.max_risk_usd:.2f}) | Ngưỡng ngắt mạch: ${new_daily_limit:.2f}")
+
         symbols = self.config.get("strategy", {}).get("symbols", ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
 
         # Kiểm tra Guardrails trước khi quét
@@ -312,10 +326,14 @@ class TradingCopilotSystem:
         stats = self.db.get_journal_stats()
         positions = self.db.get_active_positions()
 
+        curr_eq = self.db.get_account_equity(default=self.risk_engine.account_equity)
+        curr_risk = self.db.get_risk_percent(default=self.risk_engine.risk_percent)
+        risk_usd = round(curr_eq * (curr_risk / 100.0), 2)
+
         print("\n" + "=" * 65)
         print("📊 BÁO CÁO TRẠNG THÁI HỆ THỐNG (SYSTEM HEALTH & GUARDRAILS)")
         print("=" * 65)
-        print(f"• Vốn khả dụng thiết lập   : ${self.config.get('account', {}).get('equity_usd', 200.0):,.2f} USD")
+        print(f"• Vốn khả dụng thiết lập   : ${curr_eq:,.2f} USD (Rủi ro: {curr_risk}% = ${risk_usd:,.2f}/lệnh)")
         print(f"• Lãi/Lỗ trong ngày (UTC) : ${report['daily_pnl_usd']:,.2f} USD (Giới hạn: -${report['daily_loss_limit_usd']:.2f})")
         print(f"• Daily Circuit Breaker    : {'[ KÍCH HOẠT KHÓA ]' if report['daily_circuit_breaker_active'] else '[ AN TOÀN ]'}")
         print(f"• Số vị thế đang mở        : {report['active_positions_count']}/{report['max_open_positions_allowed']}")

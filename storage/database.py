@@ -102,9 +102,50 @@ class DatabaseManager:
                 metadata TEXT
             );
             """)
+
+            # 4. Bảng app_settings: Lưu trữ cài đặt người dùng (Vốn, Tỷ lệ rủi ro)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
             conn.commit()
         finally:
             conn.close()
+
+    def set_setting(self, key: str, value: str):
+        """Lưu hoặc cập nhật một tham số cài đặt vào cơ sở dữ liệu"""
+        query = """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        """
+        self._execute(query, (key, str(value)))
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Lấy giá trị cài đặt từ cơ sở dữ liệu"""
+        row = self._execute("SELECT value FROM app_settings WHERE key = ?", (key,), fetch="one")
+        return row["value"] if row else default
+
+    def set_account_equity(self, equity: float):
+        """Lưu vốn tài khoản mới"""
+        self.set_setting("account_equity", str(round(float(equity), 2)))
+
+    def get_account_equity(self, default: float = 200.0) -> float:
+        """Lấy vốn tài khoản hiện tại"""
+        val = self.get_setting("account_equity")
+        return float(val) if val is not None else float(default)
+
+    def set_risk_percent(self, percent: float):
+        """Lưu tỷ lệ rủi ro mới (%)"""
+        self.set_setting("risk_percent", str(round(float(percent), 2)))
+
+    def get_risk_percent(self, default: float = 1.0) -> float:
+        """Lấy tỷ lệ rủi ro hiện tại (%)"""
+        val = self.get_setting("risk_percent")
+        return float(val) if val is not None else float(default)
 
     def record_signal(
         self,

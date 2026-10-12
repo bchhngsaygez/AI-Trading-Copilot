@@ -285,6 +285,30 @@ class TestStorageAndGuardrails(unittest.TestCase):
         self.assertEqual(positions[0]["current_sl"], 83000.0)
         self.assertEqual(positions[0]["is_breakeven"], 1)
 
+    def test_dynamic_account_equity_and_settings(self):
+        """Kiểm tra lưu trữ, cập nhật vốn và tỷ lệ rủi ro động trong SQLite"""
+        # Mặc định ban đầu
+        self.assertEqual(self.db.get_account_equity(default=200.0), 200.0)
+        self.assertEqual(self.db.get_risk_percent(default=1.0), 1.0)
+
+        # Cập nhật vốn lên $1,000 và rủi ro 1.5%
+        self.db.set_account_equity(1000.0)
+        self.db.set_risk_percent(1.5)
+        self.assertEqual(self.db.get_account_equity(), 1000.0)
+        self.assertEqual(self.db.get_risk_percent(), 1.5)
+
+        # Cập nhật động sang RiskEngine
+        engine = DeterministicRiskEngine(account_equity=200.0, risk_percent=1.0)
+        self.assertEqual(engine.max_risk_usd, 2.00)
+        engine.update_account_equity(1000.0, 1.5)
+        self.assertEqual(engine.account_equity, 1000.0)
+        self.assertEqual(engine.risk_percent, 1.5)
+        self.assertEqual(engine.max_risk_usd, 15.00)
+
+        # Cập nhật động sang Guardrails (2% của $1,000 = $20.00)
+        self.guardrails.update_daily_loss_limit(round(1000.0 * 0.02, 2))
+        self.assertEqual(self.guardrails.daily_loss_limit_usd, 20.0)
+
 
 class TestPineScriptAndWebDashboard(unittest.TestCase):
     """Kiểm tra Pine Script v6 và Web Dashboard Indicator Studio"""

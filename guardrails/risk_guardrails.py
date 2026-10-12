@@ -42,6 +42,10 @@ class RiskGuardrails:
         self.cooldown_active_until: float = 0.0
         self.daily_lockout_active_until: float = 0.0
 
+    def update_daily_loss_limit(self, limit_usd: float):
+        """Cập nhật giới hạn ngắt mạch hàng ngày (2% vốn mới)"""
+        self.daily_loss_limit_usd = float(limit_usd)
+
     def check_can_scan_and_propose(self) -> Tuple[bool, Optional[str]]:
         """
         Kiểm tra toàn diện 4 quy tắc trước khi cho phép quét hoặc đề xuất lệnh mới:

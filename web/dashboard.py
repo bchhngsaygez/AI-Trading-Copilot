@@ -105,6 +105,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="flex flex-wrap items-center gap-3">
+        <button onclick="openEquityModal()" class="px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-emerald-500/10 active:scale-95">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          💰 Sửa Vốn & Rủi Ro
+        </button>
         <button onclick="openPineModal()" class="px-3.5 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-blue-500/10">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
           📜 Pine Script v6 (TradingView)
@@ -121,11 +125,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- METRICS GRID -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      <div class="glass-card rounded-xl p-5">
-        <div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Vốn Khả Dụng / Rủi Ro Cố Định</div>
+      <div class="glass-card rounded-xl p-5 relative overflow-hidden group">
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Vốn Khả Dụng / Rủi Ro</div>
+          <button onclick="openEquityModal()" title="Chỉnh sửa vốn và tỷ lệ rủi ro" class="px-2.5 py-1 bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 hover:text-blue-300 border border-blue-500/30 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 active:scale-95 shadow-sm">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+            Sửa Vốn
+          </button>
+        </div>
         <div class="mt-2 flex items-baseline gap-2">
           <span class="text-2xl font-bold font-mono text-white" id="stat-equity">$200.00</span>
-          <span class="text-xs font-mono text-blue-400 font-medium">1.0% ($2.00) / lệnh</span>
+          <span class="text-xs font-mono text-blue-400 font-medium" id="stat-risk-per-trade">1.0% ($2.00) / lệnh</span>
         </div>
         <div class="mt-3 text-xs text-gray-400 flex items-center gap-1.5">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-400"></span>
@@ -137,7 +147,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Daily Loss Circuit Breaker</div>
         <div class="mt-2 flex items-baseline gap-2">
           <span class="text-2xl font-bold font-mono text-white" id="stat-daily-pnl">$0.00</span>
-          <span class="text-xs font-mono text-gray-400">/ Max -$4.00 (2%)</span>
+          <span class="text-xs font-mono text-gray-400" id="stat-daily-limit">/ Max -$4.00 (2%)</span>
         </div>
         <div class="mt-3 text-xs flex items-center gap-1.5" id="stat-daily-status">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
@@ -286,7 +296,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <div class="flex justify-between"><span class="text-gray-400">Stop Loss (Buffer):</span><span class="text-rose-400 font-bold" id="comm-sl">--</span></div>
               <div class="flex justify-between"><span class="text-gray-400">Take Profit (1:2.0):</span><span class="text-blue-400 font-bold" id="comm-tp">--</span></div>
               <div class="flex justify-between"><span class="text-gray-400">Kích Thước Vị Thế:</span><span class="text-white font-bold" id="comm-size">--</span></div>
-              <div class="flex justify-between"><span class="text-gray-400">Rủi Ro Cố Định:</span><span class="text-yellow-400 font-bold">$2.00 USD (1.0%)</span></div>
+              <div class="flex justify-between"><span class="text-gray-400">Rủi Ro Cố Định:</span><span class="text-yellow-400 font-bold" id="comm-risk">$2.00 USD (1.0%)</span></div>
             </div>
           </div>
 
@@ -311,7 +321,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-3 text-xs">
         <div class="p-3 bg-brand-dark/50 rounded-lg border border-brand-border">
           <div class="text-gray-400 font-medium">1. Daily Loss Breaker:</div>
-          <div class="text-emerald-400 font-mono font-semibold mt-1">Khóa 24h khi lỗ $4.00</div>
+          <div class="text-emerald-400 font-mono font-semibold mt-1" id="guardrail-daily-desc">Khóa 24h khi lỗ $4.00</div>
         </div>
         <div class="p-3 bg-brand-dark/50 rounded-lg border border-brand-border">
           <div class="text-gray-400 font-medium">2. Max Open Positions:</div>
@@ -319,7 +329,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="p-3 bg-brand-dark/50 rounded-lg border border-brand-border">
           <div class="text-gray-400 font-medium">3. Breakeven 1.0R:</div>
-          <div class="text-emerald-400 font-mono font-semibold mt-1">Lãi >= $2.00 đôn SL về Entry</div>
+          <div class="text-emerald-400 font-mono font-semibold mt-1" id="guardrail-be-desc">Lãi >= $2.00 đôn SL về Entry</div>
         </div>
         <div class="p-3 bg-brand-dark/50 rounded-lg border border-brand-border">
           <div class="text-gray-400 font-medium">4. Anti-Tilt Cooldown:</div>
@@ -363,6 +373,120 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
     </div>
 
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: CÀI ĐẶT VỐN & TỶ LỆ RỦI RO (ACCOUNT CAPITAL & RISK MODAL)        -->
+  <!-- ========================================================================= -->
+  <div id="equityModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="glass-card rounded-2xl max-w-lg w-full border border-brand-border overflow-hidden shadow-2xl">
+      
+      <!-- Modal Header -->
+      <div class="p-5 border-b border-brand-border bg-brand-card flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="p-2 rounded-lg bg-blue-500/20 text-blue-400 border border-blue-500/30">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          </div>
+          <div>
+            <h2 class="text-base font-bold text-white">Chỉnh Sửa Vốn & Quản Trị Rủi Ro</h2>
+            <p class="text-xs text-gray-400 mt-0.5">Tự động tính toán lại Position Sizing & Daily Loss Breaker</p>
+          </div>
+        </div>
+        <button onclick="closeEquityModal()" class="text-gray-400 hover:text-white p-1 rounded-lg">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-6 space-y-5 bg-brand-dark/95">
+        
+        <!-- Input 1: Vốn tài khoản ($ USD) -->
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-gray-300 uppercase tracking-wider flex items-center justify-between">
+            <span>Số Vốn Khả Dụng (Equity USD)</span>
+            <span class="text-[11px] text-blue-400 font-mono">Tối thiểu: $10</span>
+          </label>
+          <div class="relative">
+            <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 font-mono text-sm font-semibold">$</span>
+            <input type="number" id="input-equity" step="10" min="10" class="w-full pl-8 pr-4 py-2.5 bg-brand-card border border-brand-border rounded-lg text-white font-mono text-base font-bold focus:outline-none focus:border-blue-500 transition-colors" placeholder="200.00" oninput="updateEquityPreview()">
+          </div>
+
+          <!-- Preset Chips for Equity -->
+          <div class="flex flex-wrap gap-1.5 pt-1">
+            <span class="text-[10px] text-gray-500 self-center mr-1">Gợi ý nhanh:</span>
+            <button type="button" onclick="setPresetEquity(100)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-blue-600/20 text-gray-300 hover:text-blue-400 border border-brand-border transition-colors">$100</button>
+            <button type="button" onclick="setPresetEquity(200)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-blue-600/20 text-gray-300 hover:text-blue-400 border border-brand-border transition-colors">$200</button>
+            <button type="button" onclick="setPresetEquity(500)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-blue-600/20 text-gray-300 hover:text-blue-400 border border-brand-border transition-colors">$500</button>
+            <button type="button" onclick="setPresetEquity(1000)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-blue-600/20 text-gray-300 hover:text-blue-400 border border-brand-border transition-colors">$1,000</button>
+            <button type="button" onclick="setPresetEquity(2000)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-blue-600/20 text-gray-300 hover:text-blue-400 border border-brand-border transition-colors">$2,000</button>
+            <button type="button" onclick="setPresetEquity(5000)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-blue-600/20 text-gray-300 hover:text-blue-400 border border-brand-border transition-colors">$5,000</button>
+          </div>
+        </div>
+
+        <!-- Input 2: Tỷ lệ rủi ro mỗi lệnh (% Vốn) -->
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-gray-300 uppercase tracking-wider flex items-center justify-between">
+            <span>Tỷ Lệ Rủi Ro Mỗi Lệnh (%)</span>
+            <span class="text-[11px] text-amber-400 font-mono">Chuẩn: 1.0%</span>
+          </label>
+          <div class="relative">
+            <input type="number" id="input-risk-pct" step="0.1" min="0.1" max="5.0" class="w-full px-4 py-2.5 bg-brand-card border border-brand-border rounded-lg text-white font-mono text-base font-bold focus:outline-none focus:border-blue-500 transition-colors" placeholder="1.0" oninput="updateEquityPreview()">
+            <span class="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400 font-mono text-sm font-semibold">%</span>
+          </div>
+
+          <!-- Preset Chips for Risk % -->
+          <div class="flex flex-wrap gap-1.5 pt-1">
+            <span class="text-[10px] text-gray-500 self-center mr-1">Mức rủi ro:</span>
+            <button type="button" onclick="setPresetRisk(0.5)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-emerald-600/20 text-gray-300 hover:text-emerald-400 border border-brand-border transition-colors">0.5% (Thận trọng)</button>
+            <button type="button" onclick="setPresetRisk(1.0)" class="px-2 py-0.5 text-xs font-mono rounded bg-blue-600/30 text-blue-400 border border-blue-500/40 transition-colors font-medium">1.0% (Khuyên dùng)</button>
+            <button type="button" onclick="setPresetRisk(1.5)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-amber-600/20 text-gray-300 hover:text-amber-400 border border-brand-border transition-colors">1.5%</button>
+            <button type="button" onclick="setPresetRisk(2.0)" class="px-2 py-0.5 text-xs font-mono rounded bg-brand-card hover:bg-rose-600/20 text-gray-300 hover:text-rose-400 border border-brand-border transition-colors">2.0% (Tối đa)</button>
+          </div>
+        </div>
+
+        <!-- Live Math Simulation Preview Box -->
+        <div class="p-4 rounded-xl bg-brand-card/70 border border-brand-border/80 space-y-2.5">
+          <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider flex items-center justify-between border-b border-brand-border pb-2">
+            <span>Mô Phỏng Tham Số Rủi Ro Toán Học</span>
+            <span class="text-emerald-400 font-mono text-[10px]">Deterministic Math</span>
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+            <div>
+              <span class="text-gray-400 block text-[11px]">Rủi ro tối đa / lệnh:</span>
+              <span class="text-white font-bold text-sm" id="modal-preview-risk-usd">$2.00 USD</span>
+            </div>
+            <div>
+              <span class="text-gray-400 block text-[11px]">Daily Loss Breaker (2%):</span>
+              <span class="text-rose-400 font-bold text-sm" id="modal-preview-daily-limit">-$4.00 USD</span>
+            </div>
+            <div>
+              <span class="text-gray-400 block text-[11px]">Kích hoạt Breakeven (1.0R):</span>
+              <span class="text-emerald-400 font-bold text-sm" id="modal-preview-be">Lãi +$2.00</span>
+            </div>
+            <div>
+              <span class="text-gray-400 block text-[11px]">Chống quét râu SL:</span>
+              <span class="text-blue-400 font-bold text-sm">1.2x - 1.5x ATR</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Status Message Box -->
+        <div id="modal-msg" class="hidden p-3 rounded-lg text-xs font-sans"></div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="p-4 bg-brand-card border-t border-brand-border flex items-center justify-end gap-3">
+        <button type="button" onclick="closeEquityModal()" class="px-4 py-2 bg-brand-dark hover:bg-brand-dark/80 text-gray-300 font-medium text-xs rounded-lg border border-brand-border transition-all">
+          Hủy Bỏ
+        </button>
+        <button type="button" id="btn-save-equity" onclick="saveEquity()" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-semibold text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-blue-500/20">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+          Lưu & Cập Nhật Hệ Thống
+        </button>
+      </div>
+
+    </div>
   </div>
 
   <!-- ========================================================================= -->
@@ -448,6 +572,99 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }, 2000);
     }
 
+    let currentEquity = 200.0;
+    let currentRiskPercent = 1.0;
+
+    function openEquityModal() {
+      document.getElementById('input-equity').value = currentEquity.toFixed(2);
+      document.getElementById('input-risk-pct').value = currentRiskPercent.toFixed(1);
+      updateEquityPreview();
+      const msg = document.getElementById('modal-msg');
+      msg.classList.add('hidden');
+      msg.className = "hidden p-3 rounded-lg text-xs font-sans";
+      document.getElementById('equityModal').classList.remove('hidden');
+    }
+
+    function closeEquityModal() {
+      document.getElementById('equityModal').classList.add('hidden');
+    }
+
+    function setPresetEquity(val) {
+      document.getElementById('input-equity').value = Number(val).toFixed(2);
+      updateEquityPreview();
+    }
+
+    function setPresetRisk(val) {
+      document.getElementById('input-risk-pct').value = Number(val).toFixed(1);
+      updateEquityPreview();
+    }
+
+    function updateEquityPreview() {
+      const eq = parseFloat(document.getElementById('input-equity').value) || 0;
+      const pct = parseFloat(document.getElementById('input-risk-pct').value) || 0;
+      const riskUsd = (eq * (pct / 100)).toFixed(2);
+      const dailyLimit = (eq * 0.02).toFixed(2);
+      
+      document.getElementById('modal-preview-risk-usd').innerText = `$${riskUsd} USD (${pct}%)`;
+      document.getElementById('modal-preview-daily-limit').innerText = `-$${dailyLimit} USD`;
+      document.getElementById('modal-preview-be').innerText = `Lãi +$${riskUsd}`;
+    }
+
+    async function saveEquity() {
+      const eq = parseFloat(document.getElementById('input-equity').value);
+      const pct = parseFloat(document.getElementById('input-risk-pct').value);
+      const btn = document.getElementById('btn-save-equity');
+      const msg = document.getElementById('modal-msg');
+
+      if (!eq || eq <= 0) {
+        msg.className = "p-3 rounded-lg text-xs font-sans bg-rose-500/10 border border-rose-500/30 text-rose-300";
+        msg.innerText = "Vui lòng nhập số vốn hợp lệ (> 0 USD).";
+        msg.classList.remove('hidden');
+        return;
+      }
+      if (!pct || pct <= 0 || pct > 10) {
+        msg.className = "p-3 rounded-lg text-xs font-sans bg-rose-500/10 border border-rose-500/30 text-rose-300";
+        msg.innerText = "Tỷ lệ rủi ro mỗi lệnh phải từ 0.1% đến 10%.";
+        msg.classList.remove('hidden');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = "Đang lưu...";
+
+      try {
+        const res = await fetch('/api/settings/equity', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ equity: eq, risk_percent: pct })
+        });
+        const resp = await res.json();
+        if (resp.status === 'SUCCESS') {
+          currentEquity = resp.equity;
+          currentRiskPercent = resp.risk_percent;
+          msg.className = "p-3 rounded-lg text-xs font-sans bg-emerald-500/10 border border-emerald-500/30 text-emerald-300";
+          msg.innerText = `✓ Đã cập nhật thành công vốn $${resp.equity.toFixed(2)} USD!`;
+          msg.classList.remove('hidden');
+          
+          await fetchDashboardData();
+          await fetchChartData();
+
+          setTimeout(() => {
+            closeEquityModal();
+          }, 900);
+        } else {
+          throw new Error(resp.message || "Lỗi lưu cài đặt");
+        }
+      } catch (err) {
+        msg.className = "p-3 rounded-lg text-xs font-sans bg-rose-500/10 border border-rose-500/30 text-rose-300";
+        msg.innerText = "Lỗi: " + err.message;
+        msg.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.innerText = "Lưu & Cập Nhật Hệ Thống";
+      }
+    }
+
     async function fetchChartData() {
       try {
         const res = await fetch(`/api/chart-data?symbol=${encodeURIComponent(activeSymbol)}`);
@@ -486,6 +703,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('comm-sl').innerText = `$${Number(data.proposal.sl).toLocaleString()}`;
         document.getElementById('comm-tp').innerText = `$${Number(data.proposal.tp).toLocaleString()}`;
         document.getElementById('comm-size').innerText = `${data.proposal.size} ${data.symbol.split('/')[0]}`;
+        if (document.getElementById('comm-risk')) {
+          const rUsd = data.proposal.risk_usd !== undefined ? Number(data.proposal.risk_usd).toFixed(2) : '2.00';
+          const rPct = data.proposal.risk_percent !== undefined ? Number(data.proposal.risk_percent).toFixed(1) : '1.0';
+          document.getElementById('comm-risk').innerText = `$${rUsd} USD (${rPct}%)`;
+        }
       }
 
       document.getElementById('comm-instruction').innerText = comm.instruction || "Chờ nến 15m đóng cửa xác nhận.";
@@ -636,8 +858,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const data = await res.json();
 
         // Update stats
-        document.getElementById('stat-equity').innerText = `$${data.account.equity.toFixed(2)}`;
+        currentEquity = data.account.equity || 200.0;
+        currentRiskPercent = data.account.risk_percent || 1.0;
+        const riskUsd = data.account.risk_per_trade_usd || (currentEquity * (currentRiskPercent / 100.0));
+        const dailyLimit = data.account.daily_loss_limit_usd || (currentEquity * 0.02);
+
+        document.getElementById('stat-equity').innerText = `$${currentEquity.toFixed(2)}`;
+        if (document.getElementById('stat-risk-per-trade')) {
+          document.getElementById('stat-risk-per-trade').innerText = `${currentRiskPercent.toFixed(1)}% ($${riskUsd.toFixed(2)}) / lệnh`;
+        }
         document.getElementById('stat-daily-pnl').innerText = `$${data.guardrails.daily_pnl_usd.toFixed(2)}`;
+        if (document.getElementById('stat-daily-limit')) {
+          document.getElementById('stat-daily-limit').innerText = `/ Max -$${dailyLimit.toFixed(2)} (2%)`;
+        }
+        if (document.getElementById('guardrail-daily-desc')) {
+          document.getElementById('guardrail-daily-desc').innerText = `Khóa 24h khi lỗ $${dailyLimit.toFixed(2)}`;
+        }
+        if (document.getElementById('guardrail-be-desc')) {
+          document.getElementById('guardrail-be-desc').innerText = `Lãi >= $${riskUsd.toFixed(2)} (1.0R) đôn SL về Entry`;
+        }
         document.getElementById('stat-positions').innerText = `${data.guardrails.active_positions_count} / ${data.guardrails.max_open_positions_allowed}`;
         document.getElementById('stat-winrate').innerText = `${data.journal.winrate_percent}%`;
         document.getElementById('stat-pf').innerText = `PF: ${data.journal.profit_factor}`;
@@ -742,7 +981,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
         elif url.path == "/api/data":
             db = DatabaseManager(self.db_path)
-            guardrails = RiskGuardrails(db)
+            equity = db.get_account_equity(default=float(os.environ.get("ACCOUNT_EQUITY", 200.0)))
+            risk_percent = db.get_risk_percent(default=1.0)
+            risk_per_trade_usd = round(equity * (risk_percent / 100.0), 2)
+            daily_loss_limit_usd = round(equity * 0.02, 2)
+
+            guardrails = RiskGuardrails(db, daily_loss_limit_usd=daily_loss_limit_usd)
             report = guardrails.get_guardrails_status_report()
             stats = db.get_journal_stats()
 
@@ -750,7 +994,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             positions = db.get_active_positions()
 
             payload = {
-                "account": {"equity": 200.0, "risk_per_trade_usd": 2.0},
+                "account": {
+                    "equity": equity,
+                    "risk_percent": risk_percent,
+                    "risk_per_trade_usd": risk_per_trade_usd,
+                    "daily_loss_limit_usd": daily_loss_limit_usd
+                },
                 "guardrails": report,
                 "journal": stats,
                 "signals": signals,
@@ -780,6 +1029,48 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+        elif url.path == "/api/settings/equity":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                post_data = self.rfile.read(content_length).decode("utf-8")
+                body = json.loads(post_data)
+
+                new_equity = float(body.get("equity", 0))
+                new_risk_pct = float(body.get("risk_percent", 1.0))
+
+                if new_equity <= 0:
+                    raise ValueError("Số vốn tài khoản phải lớn hơn 0 USD.")
+                if not (0.1 <= new_risk_pct <= 10.0):
+                    raise ValueError("Tỷ lệ rủi ro mỗi lệnh phải từ 0.1% đến 10.0%.")
+
+                db = DatabaseManager(self.db_path)
+                db.set_account_equity(new_equity)
+                db.set_risk_percent(new_risk_pct)
+                db.log_audit_event(
+                    "EQUITY_UPDATED",
+                    f"Người dùng cập nhật vốn thành ${new_equity:,.2f} USD (Rủi ro: {new_risk_pct}%/lệnh)",
+                    {"equity": new_equity, "risk_percent": new_risk_pct}
+                )
+
+                risk_per_trade_usd = round(new_equity * (new_risk_pct / 100.0), 2)
+                daily_loss_limit_usd = round(new_equity * 0.02, 2)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "SUCCESS",
+                    "equity": new_equity,
+                    "risk_percent": new_risk_pct,
+                    "risk_per_trade_usd": risk_per_trade_usd,
+                    "daily_loss_limit_usd": daily_loss_limit_usd,
+                    "message": f"Đã lưu thành công vốn: ${new_equity:,.2f} USD"
+                }).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
         else:
@@ -832,6 +1123,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         db = DatabaseManager(self.db_path)
         last_sig = db._execute("SELECT * FROM trade_signals WHERE symbol = ? ORDER BY id DESC LIMIT 1", (symbol,), fetch="one")
 
+        equity = db.get_account_equity(default=float(os.environ.get("ACCOUNT_EQUITY", 200.0)))
+        risk_percent = db.get_risk_percent(default=1.0)
+        risk_usd = round(equity * (risk_percent / 100.0), 2)
+        sl_dist = max(1.5 * atr_val, 0.1)
+
         signals_on_chart = []
         if last_sig:
             sig_type = "BUY_APPROVED" if last_sig["ai_decision"] == "APPROVE" else "VETO_REJECT"
@@ -855,7 +1151,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "entry": current_price,
             "sl": round(current_price - 1.5 * atr_val, 2),
             "tp": round(current_price + 3.0 * atr_val, 2),
-            "size": round(2.0 / max(1.5 * atr_val, 0.1), 4)
+            "size": round(risk_usd / sl_dist, 4),
+            "risk_usd": risk_usd,
+            "risk_percent": risk_percent,
+            "equity": equity
         }
 
         return {
