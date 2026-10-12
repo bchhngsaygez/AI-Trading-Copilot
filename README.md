@@ -221,3 +221,23 @@ alerts:
     bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
     chat_id: "YOUR_CHAT_ID"
 ```
+
+---
+
+## ☁️ 8. Hướng Dẫn Triển Khai Lên Render (Render.com)
+
+Dự án đã tích hợp sẵn tệp cấu hình Blueprint [`render.yaml`](file:///C:/Users/Bach%20Hoang/.gemini/antigravity/scratch/trading_copilot/render.yaml) giúp bạn triển khai chỉ với 1 cú click:
+
+1. Đăng nhập vào [Render.com](https://dashboard.render.com).
+2. Nhấn nút **New +** &rarr; Chọn **Web Service** (hoặc **Blueprint**).
+3. Kết nối với GitHub repository: `https://github.com/bchhngsaygez/AI-Trading-Copilot.git`.
+4. Thiết lập các thông số chính:
+   - **Environment:** `Python 3`
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `python main_daemon.py web`
+5. *(Tùy chọn)* Trong tab **Environment**, bạn có thể thêm các biến môi trường:
+   - `TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHAT_ID`: Để nhận cảnh báo qua Telegram.
+   - `OPENROUTER_API_KEY`: Để dùng mô hình AI đám mây (DeepSeek-R1 / Qwen) thay vì offline fallback.
+   - `ENABLE_SCANNER`: `true` (Tự động quét nến Binance liên tục trong background thread song song với Web Dashboard).
+6. Nhấn **Create Web Service**. Sau 1-2 phút, Render sẽ cấp cho bạn tên miền trực tuyến dạng:  
+   `https://ai-trading-copilot.onrender.com` để truy cập Web Dashboard mọi lúc mọi nơi!

@@ -109,7 +109,21 @@ class TradingCopilotSystem:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Không tìm thấy file cấu hình tại {path}")
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            cfg = yaml.safe_load(f) or {}
+
+        # Tự động nạp biến môi trường cho Render / Cloud Deployment
+        if os.environ.get("TELEGRAM_BOT_TOKEN"):
+            cfg.setdefault("alerts", {}).setdefault("telegram", {})["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+            cfg["alerts"]["telegram"]["enabled"] = True
+        if os.environ.get("TELEGRAM_CHAT_ID"):
+            cfg.setdefault("alerts", {}).setdefault("telegram", {})["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
+        if os.environ.get("OPENROUTER_API_KEY"):
+            cfg.setdefault("llm", {}).setdefault("openrouter", {})["api_key"] = os.environ["OPENROUTER_API_KEY"]
+            cfg.setdefault("llm", {})["provider"] = "openrouter"
+        if os.environ.get("ACCOUNT_EQUITY"):
+            cfg.setdefault("account", {})["equity_usd"] = float(os.environ["ACCOUNT_EQUITY"])
+
+        return cfg
 
     def build_system_input_payload(
         self,
@@ -330,7 +344,9 @@ def main():
     parser.add_argument("mode", choices=["daemon", "scan", "status", "simulate", "web"], default="scan", nargs="?",
                         help="Chế độ chạy: scan (quét 1 lần), daemon (chạy nền), status (kiểm tra tài khoản), simulate (mô phỏng), web (mở Dashboard)")
     parser.add_argument("--interval", type=int, default=60, help="Chu kỳ quét nền tính bằng giây (mặc định: 60s)")
-    parser.add_argument("--port", type=int, default=8000, help="Cổng mạng cho Web Dashboard (mặc định: 8000)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)), help="Cổng mạng cho Web Dashboard (mặc định: $PORT hoặc 8000)")
+    parser.add_argument("--host", type=str, default=os.environ.get("HOST", "0.0.0.0"), help="Host IP lắng nghe (mặc định: 0.0.0.0)")
+    parser.add_argument("--with-scanner", dest="with_scanner", action="store_true", default=None, help="Chạy luồng quét thị trường song song với Web Dashboard")
     parser.add_argument("--config", type=str, default="config/settings.yaml", help="Đường dẫn file settings.yaml")
     args = parser.parse_args()
 
@@ -350,7 +366,7 @@ def main():
     elif args.mode == "web":
         from web.dashboard import run_dashboard_server
         db_path = copilot.config.get("storage", {}).get("database_path", "storage/trades.db")
-        run_dashboard_server(port=args.port, db_path=db_path)
+        run_dashboard_server(host=args.host, port=args.port, db_path=db_path, with_scanner=args.with_scanner)
 
 
 if __name__ == "__main__":

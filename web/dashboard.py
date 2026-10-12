@@ -878,12 +878,56 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         return
 
 
-def run_dashboard_server(host: str = "127.0.0.1", port: int = 8000, db_path: str = "storage/trades.db"):
-    """Khởi động Web Dashboard Server trên cổng 8000"""
+def start_background_scanner(interval: int = 60):
+    """Chạy vòng lặp quét thị trường trong background thread song song với Web Dashboard trên Render"""
+    import threading
+    import time
+
+    def scanner_worker():
+        time.sleep(3)  # Chờ Web server bind port hoàn tất
+        try:
+            from main_daemon import TradingCopilotSystem
+            copilot = TradingCopilotSystem()
+            print(f"📡 [BACKGROUND SCANNER] Đã khởi động luồng quét tự động (Chu kỳ: {interval}s).")
+            while True:
+                try:
+                    copilot.run_scanner_cycle()
+                except Exception as err:
+                    print(f"⚠️ [BACKGROUND SCANNER ERROR]: {err}")
+                time.sleep(interval)
+        except Exception as err:
+            print(f"❌ [BACKGROUND SCANNER INIT FAILED]: {err}")
+
+    t = threading.Thread(target=scanner_worker, daemon=True, name="BackgroundScanner")
+    t.start()
+
+
+def run_dashboard_server(
+    host: str = "0.0.0.0",
+    port: Optional[int] = None,
+    db_path: str = "storage/trades.db",
+    with_scanner: Optional[bool] = None
+):
+    """
+    Khởi động Web Dashboard Server tương thích hoàn toàn Render và Local:
+    - Bind mặc định: 0.0.0.0
+    - Cổng mạng: Đọc từ biến môi trường PORT (Render cung cấp) hoặc port chỉ định
+    - Tự động chạy Background Scanner thread nếu ENABLE_SCANNER=true
+    """
+    if port is None:
+        port = int(os.environ.get("PORT", 8000))
+
+    if with_scanner is None:
+        with_scanner = os.environ.get("ENABLE_SCANNER", "true").lower() in ("true", "1", "yes")
+
+    if with_scanner:
+        scan_interval = int(os.environ.get("SCAN_INTERVAL", "60"))
+        start_background_scanner(interval=scan_interval)
+
     handler = lambda *args, **kwargs: DashboardRequestHandler(*args, db_path=db_path, **kwargs)
     server = HTTPServer((host, port), handler)
     print(f"\n🚀 AI Trading Copilot Web Dashboard & Indicator Studio đang chạy tại: http://{host}:{port}")
-    print("Mở trình duyệt để theo dõi Dual Tracking Lines và Pine Script v6. (Nhấn Ctrl+C để dừng)\n")
+    print(f"🌍 Tương thích Render Cloud: Đang lắng nghe trên host '{host}' cổng '{port}'\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

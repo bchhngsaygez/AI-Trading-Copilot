@@ -1,0 +1,28 @@
+# ==============================================================================
+# RENDER.COM BLUEPRINT SPECIFICATION
+# Tự động hóa triển khai AI Trading Copilot lên Render Cloud
+# ==============================================================================
+
+services:
+  - type: web
+    name: ai-trading-copilot
+    env: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main_daemon.py web
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ENABLE_SCANNER
+        value: "true"
+      - key: SCAN_INTERVAL
+        value: "60"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: ACCOUNT_EQUITY
+        value: "200.0"
