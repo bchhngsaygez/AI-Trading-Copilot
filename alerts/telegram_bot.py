@@ -54,6 +54,7 @@ class AlertDispatcher:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.enable_color = enable_color
+        self.last_update_id = 0
 
     def format_telegram_message(
         self,
@@ -159,6 +160,194 @@ class AlertDispatcher:
         except Exception as e:
             logger.error(f"Lỗi kết nối Telegram Bot: {e}")
         return False
+
+    def send_message(self, text: str, reply_markup: Optional[Dict] = None) -> bool:
+        """Gửi tin nhắn tùy biến tới Telegram"""
+        if not self.telegram_enabled:
+            return False
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        try:
+            resp = requests.post(url, json=payload, timeout=5.0)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.error(f"Lỗi gửi tin nhắn Telegram: {e}")
+            return False
+
+    def send_auto_trade_alert(
+        self,
+        symbol: str,
+        proposal: Dict[str, Any],
+        exec_res: Dict[str, Any]
+    ) -> bool:
+        """Bắn thông báo kết quả tự động khớp lệnh sàn giao dịch"""
+        if not self.telegram_enabled:
+            return False
+
+        success = exec_res.get("executed", False)
+        exchange = exec_res.get("exchange", "binance").upper()
+        env_tag = "TESTNET" if exec_res.get("is_testnet", True) else "MAINNET REAL"
+        order_id = exec_res.get("order_id", "N/A")
+        action = proposal.get("action", "BUY_LIMIT")
+        entry = proposal.get("entry_price", 0)
+        sl = proposal.get("stop_loss", 0)
+        tp = proposal.get("take_profit", 0)
+        size = proposal.get("position_size", 0)
+        sl_oid = exec_res.get("sl_order_id", "N/A")
+        tp_oid = exec_res.get("tp_order_id", "N/A")
+
+        if success:
+            msg = (
+                f"⚡ <b>[AUTO-TRADE ĐÃ ĐẶT LỆNH THÀNH CÔNG]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏛️ <b>Sàn Giao Dịch:</b> <code>{exchange}</code> (Chế độ: <b>{env_tag}</b>)\n"
+                f"📌 <b>Cặp Coin:</b> <code>{symbol}</code>\n"
+                f"🎯 <b>Loại Lệnh:</b> <code>{action}</code>\n"
+                f"💰 <b>Giá Entry:</b> <code>${entry:,.2f}</code>\n"
+                f"📦 <b>Khối Lượng:</b> <code>{size} {symbol.split('/')[0]}</code>\n"
+                f"🛑 <b>Stop Loss:</b> <code>${sl:,.2f}</code> (Order #{sl_oid})\n"
+                f"🎯 <b>Take Profit:</b> <code>${tp:,.2f}</code> (Order #{tp_oid})\n"
+                f"🔢 <b>Mã Order Sàn:</b> <code>#{order_id}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Lệnh Limit và các rào chắn SL/TP đã được kích hoạt trực tiếp trên sàn!"
+            )
+        else:
+            err = exec_res.get("raw", {}).get("error") or exec_res.get("message", "Lỗi không xác định")
+            msg = (
+                f"⚠️ <b>[AUTO-TRADE ĐẶT LỆNH THẤT BẠI]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏛️ <b>Sàn Giao Dịch:</b> <code>{exchange}</code> ({env_tag})\n"
+                f"📌 <b>Cặp Coin:</b> <code>{symbol}</code> | <b>Hành Động:</b> {action}\n"
+                f"❌ <b>Lý Do Lỗi:</b> <code>{err}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 Vui lòng kiểm tra lại số dư ký quỹ hoặc quyền hạn API Key của bạn."
+            )
+
+        return self.send_message(msg)
+
+    def poll_telegram_updates(self, db, order_executor=None):
+        """
+        Lắng nghe và xử lý các lệnh điều khiển từ người dùng qua Telegram Bot:
+        /autotrade on | /autotrade off | /autotrade status | /setkeys | /testkeys | /help
+        """
+        if not self.telegram_enabled:
+            return
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+        params = {"offset": self.last_update_id + 1, "timeout": 1}
+
+        try:
+            resp = requests.get(url, params=params, timeout=3.0)
+            if resp.status_code != 200:
+                return
+
+            data = resp.json()
+            updates = data.get("result", [])
+            for upd in updates:
+                self.last_update_id = max(self.last_update_id, upd.get("update_id", 0))
+                msg = upd.get("message", {})
+                chat = msg.get("chat", {})
+                chat_id = str(chat.get("id", ""))
+                text = msg.get("text", "").strip()
+
+                # Kiểm tra quyền: chỉ nhận lệnh từ chat_id đã cấu hình
+                if str(chat_id) != str(self.chat_id) or not text:
+                    continue
+
+                self._handle_bot_command(text, db, order_executor)
+
+        except Exception as e:
+            logger.debug(f"Poll telegram updates error: {e}")
+
+    def _handle_bot_command(self, text: str, db, order_executor):
+        """Xử lý cú pháp lệnh bot"""
+        cmd_parts = text.split()
+        cmd = cmd_parts[0].lower()
+
+        if cmd in ("/start", "/help"):
+            help_msg = (
+                f"🤖 <b>AI TRADING COPILOT | ĐIỀU KHIỂN TỰ ĐỘNG</b>\n\n"
+                f"• <code>/autotrade on</code> - Bật tính năng tự động đặt lệnh khi AI APPROVE\n"
+                f"• <code>/autotrade off</code> - Tắt tự động đặt lệnh (chỉ gửi cảnh báo)\n"
+                f"• <code>/autotrade status</code> - Kiểm tra trạng thái kết nối & Auto-Trade\n"
+                f"• <code>/testkeys</code> - Kiểm tra kết nối API Key và kiểm tra số dư ví sàn\n"
+                f"• <code>/setkeys &lt;sàn&gt; &lt;key&gt; &lt;secret&gt; [testnet/real]</code> - Cài đặt API Key sàn\n"
+                f"  <i>Ví dụ:</i> <code>/setkeys binance key123 sec456 testnet</code>\n"
+                f"  <i>(Sàn hỗ trợ: binance, bybit)</i>\n"
+                f"• <code>/status</code> - Xem trạng thái vốn, Daily Loss Breaker & Winrate"
+            )
+            self.send_message(help_msg)
+
+        elif cmd == "/autotrade":
+            sub = cmd_parts[1].lower() if len(cmd_parts) > 1 else "status"
+            if sub == "on":
+                db.set_auto_trade_enabled(True)
+                cfg = db.get_exchange_config()
+                env = "Testnet" if cfg.get("is_testnet") else "MAINNET REAL"
+                self.send_message(
+                    f"✅ <b>ĐÃ BẬT TỰ ĐỘNG ĐẶT LỆNH (AUTO-TRADE: ON)</b>\n"
+                    f"🏛️ Sàn: <b>{cfg.get('exchange', 'binance').upper()}</b> ({env})\n"
+                    f"🎯 Khi AI ra quyết định APPROVE, hệ thống sẽ tự động gửi lệnh Limit + SL/TP lên sàn."
+                )
+            elif sub == "off":
+                db.set_auto_trade_enabled(False)
+                self.send_message(
+                    f"⏸️ <b>ĐÃ TẮT TỰ ĐỘNG ĐẶT LỆNH (AUTO-TRADE: OFF)</b>\n"
+                    f"Hệ thống đã chuyển về chế độ chỉ báo và cảnh báo thủ công an toàn."
+                )
+            elif sub == "status":
+                cfg = db.get_exchange_config()
+                is_on = db.is_auto_trade_enabled()
+                env = "Testnet" if cfg.get("is_testnet") else "MAINNET REAL"
+                masked_key = (cfg.get("api_key")[:6] + "...") if len(cfg.get("api_key", "")) > 6 else "(Chưa có)"
+                status_icon = "🟢 ĐANG BẬT" if is_on else "🔴 ĐANG TẮT"
+                self.send_message(
+                    f"⚙️ <b>TRẠNG THÁI TỰ ĐỘNG ĐẶT LỆNH</b>\n"
+                    f"• Trạng Thái: <b>{status_icon}</b>\n"
+                    f"• Sàn Giao Dịch: <code>{cfg.get('exchange', 'binance').upper()}</code>\n"
+                    f"• Môi Trường: <b>{env}</b>\n"
+                    f"• API Key: <code>{masked_key}</code>\n"
+                    f"• Lệnh Gần Nhất: Xem trên Web Dashboard"
+                )
+
+        elif cmd == "/testkeys":
+            cfg = db.get_exchange_config()
+            if order_executor:
+                client = order_executor.get_client_for_config(cfg)
+                if not client:
+                    self.send_message(f"❌ Chưa có API Key/Secret cho sàn {cfg.get('exchange', 'binance').upper()}. Dùng <code>/setkeys</code> để cài đặt.")
+                    return
+                res = client.test_connection()
+                if res.get("success"):
+                    self.send_message(f"✅ {res.get('message')}")
+                else:
+                    self.send_message(f"❌ {res.get('message')}")
+
+        elif cmd == "/setkeys":
+            if len(cmd_parts) < 4:
+                self.send_message("❌ Sai cú pháp. Dùng:\n<code>/setkeys &lt;binance/bybit&gt; &lt;api_key&gt; &lt;api_secret&gt; [testnet/real]</code>")
+                return
+            exchange = cmd_parts[1].lower()
+            api_key = cmd_parts[2]
+            api_secret = cmd_parts[3]
+            is_testnet = (cmd_parts[4].lower() != "real") if len(cmd_parts) > 4 else True
+            db.save_exchange_config(
+                exchange=exchange,
+                api_key=api_key,
+                api_secret=api_secret,
+                is_testnet=is_testnet,
+                auto_trade_enabled=db.is_auto_trade_enabled()
+            )
+            env_str = "TESTNET (Khuyên dùng)" if is_testnet else "MAINNET REAL"
+            self.send_message(
+                f"✅ <b>ĐÃ CẬP NHẬT API KEY THÀNH CÔNG!</b>\n"
+                f"• Sàn: <b>{exchange.upper()}</b>\n"
+                f"• Chế độ: <b>{env_str}</b>\n"
+                f"💡 Hãy gõ <code>/testkeys</code> để kiểm tra số dư và quyền hạn ngay!\n"
+                f"⚠️ <i>Mẹo bảo mật: Bạn có thể xóa tin nhắn vừa gửi chứa key trên Telegram.</i>"
+            )
 
     def print_terminal_card(
         self,

@@ -8,6 +8,7 @@ SQLite Database, và Guardrails bảo vệ tài khoản.
 import os
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 
@@ -20,6 +21,8 @@ from core.copilot_agent import HardVetoEnforcer, DeterministicDevilAdvocate
 from storage.database import DatabaseManager
 from guardrails.risk_guardrails import RiskGuardrails
 from alerts.telegram_bot import AlertDispatcher
+from execution.exchange_client import BinanceFuturesClient, BybitPerpetualClient, WebhookClient
+from execution.order_executor import OrderExecutor
 
 
 class TestDeterministicRiskEngine(unittest.TestCase):
@@ -358,6 +361,182 @@ class TestPineScriptAndWebDashboard(unittest.TestCase):
         self.assertLess(last_second, last_main)
 
 
+class TestExchangeExecutionAndAutoTrade(unittest.TestCase):
+    """Kiểm tra module Kết Nối Sàn & Tự Động Đặt Lệnh (Chương 7)"""
+
+    def setUp(self):
+        self.test_db_path = "storage/test_execution.db"
+        if os.path.exists(self.test_db_path):
+            os.remove(self.test_db_path)
+        self.db = DatabaseManager(self.test_db_path)
+        self.executor = OrderExecutor(self.db)
+
+    def tearDown(self):
+        if os.path.exists(self.test_db_path):
+            os.remove(self.test_db_path)
+
+    def test_exchange_config_persistence(self):
+        """Kiểm tra lưu trữ và truy xuất cấu hình sàn giao dịch"""
+        self.db.save_exchange_config(
+            exchange="binance",
+            api_key="test_api_key_123456",
+            api_secret="test_api_secret_abcdef",
+            is_testnet=True,
+            auto_trade_enabled=True,
+            webhook_url="https://test.webhook.com/alert"
+        )
+        cfg = self.db.get_exchange_config()
+        self.assertEqual(cfg["exchange"], "binance")
+        self.assertEqual(cfg["api_key"], "test_api_key_123456")
+        self.assertEqual(cfg["api_secret"], "test_api_secret_abcdef")
+        self.assertTrue(cfg["is_testnet"])
+        self.assertTrue(cfg["auto_trade_enabled"])
+        self.assertTrue(self.db.is_auto_trade_enabled())
+
+        # Toggle tắt auto-trade
+        self.db.set_auto_trade_enabled(False)
+        self.assertFalse(self.db.is_auto_trade_enabled())
+
+    def test_executed_orders_record_and_retrieve(self):
+        """Kiểm tra ghi nhận nhật ký lệnh đặt lên sàn"""
+        order_id = self.db.record_executed_order(
+            signal_id=10,
+            exchange="bybit",
+            symbol="ETH/USDT",
+            side="BUY",
+            order_type="LIMIT",
+            price=2550.0,
+            quantity=0.1,
+            order_id="bybit_ord_987",
+            status="SUBMITTED",
+            sl_order_id="sl_001",
+            tp_order_id="tp_001",
+            is_testnet=True
+        )
+        self.assertIsNotNone(order_id)
+        orders = self.db.get_executed_orders(limit=10)
+        self.assertGreaterEqual(len(orders), 1)
+        ord_record = orders[0]
+        self.assertEqual(ord_record["symbol"], "ETH/USDT")
+        self.assertEqual(ord_record["price"], 2550.0)
+        self.assertEqual(ord_record["exchange"], "bybit")
+        self.assertEqual(ord_record["status"], "SUBMITTED")
+
+    def test_binance_client_signing_and_mock_execution(self):
+        """Kiểm tra thuật toán ký HMAC-SHA256 của BinanceFuturesClient"""
+        client = BinanceFuturesClient(api_key="mock_key", api_secret="mock_secret", is_testnet=True)
+        params = {"symbol": "BTCUSDT", "side": "BUY"}
+        query = client._sign_params(params)
+        self.assertIn("timestamp=", query)
+        self.assertIn("signature=", query)
+
+        # Mock requests.Session.post cho đặt lệnh Binance
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"orderId": 12345678, "status": "NEW"}
+        
+        with patch.object(client.session, 'post', return_value=mock_response):
+            res = client.place_order(
+                symbol="BTC/USDT",
+                side="BUY",
+                order_type="LIMIT",
+                price=83000.0,
+                quantity=0.005,
+                stop_loss=82500.0,
+                take_profit=84000.0
+            )
+            self.assertTrue(res["success"])
+            self.assertEqual(res["order_id"], "12345678")
+
+    def test_bybit_client_mock_execution(self):
+        """Kiểm tra Bybit V5 Perpetual Client đặt lệnh kèm SL/TP"""
+        client = BybitPerpetualClient(api_key="mock_bybit_key", api_secret="mock_bybit_secret", is_testnet=True)
+        
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "retCode": 0,
+            "result": {"orderId": "bybit_112233"}
+        }
+
+        with patch.object(client.session, 'post', return_value=mock_response):
+            res = client.place_order(
+                symbol="BTC/USDT",
+                side="BUY",
+                order_type="LIMIT",
+                price=83000.0,
+                quantity=0.005,
+                stop_loss=82500.0,
+                take_profit=84000.0
+            )
+            self.assertTrue(res["success"])
+            self.assertEqual(res["order_id"], "bybit_112233")
+
+    def test_webhook_client_dispatch(self):
+        """Kiểm tra gửi JSON Alert qua WebhookClient"""
+        client = WebhookClient(webhook_url="https://fake-webhook.com/api/alert")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        with patch("requests.post", return_value=mock_response):
+            res = client.place_order(
+                symbol="SOL/USDT",
+                side="BUY",
+                order_type="LIMIT",
+                price=110.0,
+                quantity=1.0,
+                stop_loss=105.0,
+                take_profit=120.0
+            )
+            self.assertTrue(res["success"])
+
+    def test_order_executor_guard_conditions(self):
+        """Kiểm tra các rào chắn điều kiện trước khi cho phép đặt lệnh"""
+        proposal = {
+            "action": "BUY_LIMIT",
+            "entry_price": 83000.0,
+            "position_size": 0.005,
+            "stop_loss": 82500.0,
+            "take_profit": 84000.0
+        }
+
+        # 1. Bị chặn khi Auto-Trade đang TẮT
+        self.db.set_auto_trade_enabled(False)
+        res1 = self.executor.execute_signal("BTC/USDT", proposal, {"action_decision": "APPROVE"})
+        self.assertFalse(res1["executed"])
+        self.assertEqual(res1["reason"], "AUTO_TRADE_DISABLED")
+
+        # 2. Bị chặn khi AI Copilot VETO / REJECT
+        self.db.set_auto_trade_enabled(True)
+        res2 = self.executor.execute_signal("BTC/USDT", proposal, {"action_decision": "REJECT"})
+        self.assertFalse(res2["executed"])
+        self.assertEqual(res2["reason"], "NOT_APPROVED")
+
+        # 3. Kích hoạt thành công khi APPROVE và Auto-Trade BẬT
+        self.db.save_exchange_config(
+            exchange="binance",
+            api_key="valid_key",
+            api_secret="valid_secret",
+            is_testnet=True,
+            auto_trade_enabled=True
+        )
+        mock_client = MagicMock()
+        mock_client.place_order.return_value = {
+            "success": True,
+            "order_id": "auto_ord_999",
+            "client_order_id": "cl_999"
+        }
+        with patch.object(self.executor, 'get_client_for_config', return_value=mock_client):
+            res3 = self.executor.execute_signal("BTC/USDT", proposal, {"action_decision": "APPROVE"})
+            self.assertTrue(res3["executed"])
+            self.assertEqual(res3["order_id"], "auto_ord_999")
+            
+            # Kiểm tra nhật ký đã được ghi vào DB
+            orders = self.db.get_executed_orders(limit=5)
+            self.assertGreaterEqual(len(orders), 1)
+            self.assertEqual(orders[0]["order_id"], "auto_ord_999")
+
+
 def run_all_tests():
     suite = unittest.TestSuite()
     suite.addTest(unittest.makeSuite(TestDeterministicRiskEngine))
@@ -365,6 +544,7 @@ def run_all_tests():
     suite.addTest(unittest.makeSuite(TestHardVetoRules))
     suite.addTest(unittest.makeSuite(TestStorageAndGuardrails))
     suite.addTest(unittest.makeSuite(TestPineScriptAndWebDashboard))
+    suite.addTest(unittest.makeSuite(TestExchangeExecutionAndAutoTrade))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
@@ -373,3 +553,4 @@ def run_all_tests():
 
 if __name__ == "__main__":
     unittest.main()
+

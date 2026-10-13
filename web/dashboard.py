@@ -26,6 +26,8 @@ from storage.database import DatabaseManager
 from guardrails.risk_guardrails import RiskGuardrails
 from core.data_feed import MarketDataFeed
 from core.indicator_engine import QuantitativeIndicatorEngine
+from execution.exchange_client import BinanceFuturesClient, BybitPerpetualClient, WebhookClient
+from execution.order_executor import OrderExecutor
 
 logger = logging.getLogger("WebDashboard")
 
@@ -105,20 +107,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="flex flex-wrap items-center gap-3">
+        <!-- NÚT BẬT/TẮT NHANH AUTO-TRADE -->
+        <button id="btn-autotrade-toggle" onclick="toggleAutoTrade()" class="px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all bg-rose-500/15 border border-rose-500/30 text-rose-400 hover:bg-rose-500/25 active:scale-95 shadow-sm" title="Bật/Tắt tự động đặt lệnh sàn khi AI APPROVE">
+          <span class="w-2 h-2 rounded-full bg-rose-500" id="autotrade-dot"></span>
+          <span id="autotrade-badge-text">Auto-Trade: TẮT</span>
+        </button>
+
+        <!-- NÚT CÀI ĐẶT SÀN & API KEY -->
+        <button onclick="openExchangeModal()" class="px-3.5 py-2 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-orange-500/10 active:scale-95">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+          ⚙️ Sàn & API Key
+        </button>
+
         <button onclick="openEquityModal()" class="px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-emerald-500/10 active:scale-95">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-          💰 Sửa Vốn & Rủi Ro
+          💰 Sửa Vốn
         </button>
         <button onclick="openPineModal()" class="px-3.5 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-blue-500/10">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
-          📜 Pine Script v6 (TradingView)
+          📜 Pine Script v6
         </button>
         <button id="btn-scan" onclick="triggerScan()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-blue-500/20">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-          Quét Thị Trường Ngay
+          Quét Ngay
         </button>
         <span class="text-xs text-gray-400 font-mono px-3 py-2 bg-brand-card rounded-lg border border-brand-border">
-          Cập nhật: <span id="last-updated">Đang tải...</span>
+          <span id="last-updated">Đang tải...</span>
         </span>
       </div>
     </header>
@@ -373,6 +387,48 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- AUTO-EXECUTED ORDERS TABLE -->
+    <div class="glass-card rounded-xl overflow-hidden">
+      <div class="p-5 border-b border-brand-border flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="p-2 rounded-lg bg-orange-500/20 text-orange-400 border border-orange-500/30">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+          </div>
+          <div>
+            <h2 class="text-base font-bold text-white">Nhật Ký Tự Động Đặt Lệnh Sàn (Auto-Executed Orders)</h2>
+            <p class="text-xs text-gray-400 mt-0.5">Lệnh được tự động kích hoạt trực tiếp lên sàn Binance / Bybit khi AI ra phán quyết APPROVE</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-mono text-gray-400 px-2.5 py-1 bg-brand-dark rounded border border-brand-border" id="executed-order-count">0 lệnh</span>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs font-mono">
+          <thead class="bg-brand-dark/70 text-gray-400 uppercase tracking-wider border-b border-brand-border">
+            <tr>
+              <th class="py-3 px-4">ID</th>
+              <th class="py-3 px-4">Thời Gian</th>
+              <th class="py-3 px-4">Sàn Giao Dịch</th>
+              <th class="py-3 px-4">Môi Trường</th>
+              <th class="py-3 px-4">Cặp Coin</th>
+              <th class="py-3 px-4">Loại / Phía</th>
+              <th class="py-3 px-4">Giá Khớp Limit</th>
+              <th class="py-3 px-4">Khối Lượng</th>
+              <th class="py-3 px-4">Trạng Thái</th>
+              <th class="py-3 px-4">Chi Tiết / Mã Lệnh Sàn</th>
+            </tr>
+          </thead>
+          <tbody id="executed-orders-tbody" class="divide-y divide-brand-border text-gray-300">
+            <tr>
+              <td colspan="10" class="py-8 text-center text-gray-500 font-sans">Chưa có lệnh tự động nào được gửi lên sàn.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
   </div>
 
   <!-- ========================================================================= -->
@@ -525,6 +581,148 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ========================================================================= -->
+  <!-- MODAL: CẤU HÌNH SÀN GIAO DỊCH & API KEY (EXCHANGE & AUTO-TRADE SETTINGS)  -->
+  <!-- ========================================================================= -->
+  <div id="exchangeModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="glass-card rounded-2xl max-w-xl w-full border border-brand-border overflow-hidden shadow-2xl max-h-[92vh] flex flex-col">
+      
+      <!-- Modal Header -->
+      <div class="p-5 border-b border-brand-border bg-brand-card flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="p-2 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+          </div>
+          <div>
+            <h2 class="text-base font-bold text-white">Cấu Hình Sàn & Tự Động Đặt Lệnh (Auto-Trade)</h2>
+            <p class="text-xs text-gray-400 mt-0.5">Tự động đặt lệnh Limit + SL/TP ngay khi AI Copilot phê duyệt APPROVE</p>
+          </div>
+        </div>
+        <button onclick="closeExchangeModal()" class="text-gray-400 hover:text-white p-1 rounded-lg">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-6 space-y-5 bg-brand-dark/95 overflow-y-auto flex-1">
+        
+        <!-- Toggle Auto-Trade switch -->
+        <div class="p-3.5 rounded-xl bg-brand-card border border-brand-border flex items-center justify-between">
+          <div>
+            <div class="text-xs font-bold text-white uppercase tracking-wider">Kích Hoạt Tự Động Đặt Lệnh (Auto-Trade)</div>
+            <div class="text-[11px] text-gray-400 mt-0.5">Chỉ gửi lệnh khi AI phán quyết APPROVE và vượt qua cả 4 rào chắn rủi ro</div>
+          </div>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" id="modal-autotrade-enabled" class="sr-only peer">
+            <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500"></div>
+          </label>
+        </div>
+
+        <!-- Chọn Sàn giao dịch -->
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-gray-300 uppercase tracking-wider">Chọn Sàn Giao Dịch</label>
+          <div class="grid grid-cols-3 gap-2">
+            <button type="button" onclick="selectExchange('binance')" id="btn-ex-binance" class="py-2.5 px-3 rounded-lg border text-xs font-mono font-bold flex flex-col items-center gap-1 transition-all bg-amber-500/20 border-amber-500 text-amber-300">
+              <span>🟡 Binance Futures</span>
+              <span class="text-[10px] text-gray-400 font-sans font-normal">USDT-M Perpetual</span>
+            </button>
+            <button type="button" onclick="selectExchange('bybit')" id="btn-ex-bybit" class="py-2.5 px-3 rounded-lg border text-xs font-mono font-bold flex flex-col items-center gap-1 transition-all bg-brand-card border-brand-border text-gray-400 hover:text-white">
+              <span>🟠 Bybit V5</span>
+              <span class="text-[10px] text-gray-400 font-sans font-normal">Linear Perpetual</span>
+            </button>
+            <button type="button" onclick="selectExchange('webhook')" id="btn-ex-webhook" class="py-2.5 px-3 rounded-lg border text-xs font-mono font-bold flex flex-col items-center gap-1 transition-all bg-brand-card border-brand-border text-gray-400 hover:text-white">
+              <span>🌐 Webhook Alert</span>
+              <span class="text-[10px] text-gray-400 font-sans font-normal">TradingView/Bot</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Chọn Môi Trường Testnet / Mainnet -->
+        <div id="section-network-mode" class="space-y-2">
+          <label class="text-xs font-semibold text-gray-300 uppercase tracking-wider flex items-center justify-between">
+            <span>Môi Trường Thực Thi</span>
+            <span class="text-[11px] text-emerald-400 font-sans">Khuyên dùng Testnet để thử nghiệm</span>
+          </label>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="flex items-center gap-2.5 p-3 rounded-lg bg-brand-card border border-brand-border cursor-pointer hover:border-gray-500 transition-colors">
+              <input type="radio" name="network_mode" value="testnet" id="radio-testnet" class="text-emerald-500 focus:ring-0" checked>
+              <div>
+                <div class="text-xs font-bold text-white">🧪 Testnet (Demo)</div>
+                <div class="text-[10px] text-gray-400">Tiền ảo thử nghiệm không mất phí</div>
+              </div>
+            </label>
+            <label class="flex items-center gap-2.5 p-3 rounded-lg bg-brand-card border border-brand-border cursor-pointer hover:border-gray-500 transition-colors">
+              <input type="radio" name="network_mode" value="mainnet" id="radio-mainnet" class="text-rose-500 focus:ring-0">
+              <div>
+                <div class="text-xs font-bold text-rose-300">⚡ Mainnet (Tiền Thật)</div>
+                <div class="text-[10px] text-gray-400">Giao dịch tiền thật trên sàn</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Inputs cho API Key / Secret (Dành cho Binance / Bybit) -->
+        <div id="section-api-keys" class="space-y-3">
+          <div class="space-y-1.5">
+            <label class="text-xs font-semibold text-gray-300 uppercase tracking-wider flex items-center justify-between">
+              <span>API Key</span>
+              <span class="text-[11px] text-gray-400" id="label-masked-key"></span>
+            </label>
+            <input type="text" id="input-api-key" class="w-full px-4 py-2 bg-brand-card border border-brand-border rounded-lg text-white font-mono text-xs focus:outline-none focus:border-amber-500 transition-colors" placeholder="Dán API Key từ sàn...">
+          </div>
+
+          <div class="space-y-1.5">
+            <label class="text-xs font-semibold text-gray-300 uppercase tracking-wider flex items-center justify-between">
+              <span>API Secret</span>
+              <span class="text-[11px] text-gray-500" id="label-masked-secret">(Để trống nếu giữ nguyên secret đã lưu)</span>
+            </label>
+            <input type="password" id="input-api-secret" class="w-full px-4 py-2 bg-brand-card border border-brand-border rounded-lg text-white font-mono text-xs focus:outline-none focus:border-amber-500 transition-colors" placeholder="••••••••••••••••••••••••••••">
+          </div>
+        </div>
+
+        <!-- Input cho Webhook URL (Dành cho Webhook) -->
+        <div id="section-webhook-url" class="space-y-1.5 hidden">
+          <label class="text-xs font-semibold text-gray-300 uppercase tracking-wider">Outbound Webhook URL</label>
+          <input type="url" id="input-webhook-url" class="w-full px-4 py-2 bg-brand-card border border-brand-border rounded-lg text-white font-mono text-xs focus:outline-none focus:border-blue-500 transition-colors" placeholder="https://your-webhook-endpoint.com/api/alert">
+          <p class="text-[11px] text-gray-400 mt-1">Khi AI ra phán quyết APPROVE, payload lệnh kèm SL/TP sẽ được POST tới URL này.</p>
+        </div>
+
+        <!-- Cảnh báo bảo mật -->
+        <div class="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-[11px] text-amber-200/90 leading-relaxed flex items-start gap-2">
+          <span class="text-base">🛡️</span>
+          <div>
+            <strong>Nguyên tắc an toàn tối thượng:</strong><br>
+            1. Khi tạo API Key trên sàn, <strong>CHỈ BẬT</strong> quyền <em>Enable Futures (Giao dịch Phái sinh)</em>.<br>
+            2. <strong>TUYỆT ĐỐI KHÔNG BẬT</strong> quyền <em>Enable Withdrawals (Rút tiền)</em>.<br>
+            3. Khuyên bạn nên thử nghiệm trên tài khoản <strong>Testnet</strong> trước để kiểm chứng hệ thống.
+          </div>
+        </div>
+
+        <!-- Notification Message Box in Modal -->
+        <div id="exchange-modal-msg" class="hidden p-3 rounded-lg text-xs font-sans"></div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="p-4 border-t border-brand-border bg-brand-card flex items-center justify-between gap-3">
+        <button type="button" id="btn-test-connection" onclick="testExchangeConnection()" class="px-3.5 py-2 rounded-lg text-xs font-semibold bg-gray-700/80 hover:bg-gray-700 text-gray-200 border border-gray-600 transition-all flex items-center gap-1.5 active:scale-95">
+          <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+          Kiểm Tra Kết Nối
+        </button>
+
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="closeExchangeModal()" class="px-4 py-2 rounded-lg text-xs font-medium text-gray-400 hover:text-white transition-colors">
+            Đóng
+          </button>
+          <button type="button" id="btn-save-exchange" onclick="saveExchangeConfig()" class="px-5 py-2 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white transition-all shadow-lg shadow-amber-600/20 active:scale-95">
+            Lưu Cấu Hình
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
   <script>
     let activeSymbol = "BTC/USDT";
     let chartData = null;
@@ -662,6 +860,197 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       } finally {
         btn.disabled = false;
         btn.innerText = "Lưu & Cập Nhật Hệ Thống";
+      }
+    }
+
+    let selectedExchange = 'binance';
+
+    function selectExchange(name) {
+      selectedExchange = name;
+      ['binance', 'bybit', 'webhook'].forEach(k => {
+        const btn = document.getElementById(`btn-ex-${k}`);
+        if (!btn) return;
+        if (k === name) {
+          btn.className = "py-2.5 px-3 rounded-lg border text-xs font-mono font-bold flex flex-col items-center gap-1 transition-all bg-amber-500/20 border-amber-500 text-amber-300";
+        } else {
+          btn.className = "py-2.5 px-3 rounded-lg border text-xs font-mono font-bold flex flex-col items-center gap-1 transition-all bg-brand-card border-brand-border text-gray-400 hover:text-white";
+        }
+      });
+
+      const secNet = document.getElementById('section-network-mode');
+      const secKeys = document.getElementById('section-api-keys');
+      const secWeb = document.getElementById('section-webhook-url');
+
+      if (name === 'webhook') {
+        if (secNet) secNet.classList.add('hidden');
+        if (secKeys) secKeys.classList.add('hidden');
+        if (secWeb) secWeb.classList.remove('hidden');
+      } else {
+        if (secNet) secNet.classList.remove('hidden');
+        if (secKeys) secKeys.classList.remove('hidden');
+        if (secWeb) secWeb.classList.add('hidden');
+      }
+    }
+
+    async function openExchangeModal() {
+      const msg = document.getElementById('exchange-modal-msg');
+      if (msg) {
+        msg.classList.add('hidden');
+        msg.className = "hidden p-3 rounded-lg text-xs font-sans";
+      }
+
+      try {
+        const res = await fetch('/api/settings/exchange');
+        const cfg = await res.json();
+        
+        selectExchange(cfg.exchange || 'binance');
+
+        const chkAuto = document.getElementById('modal-autotrade-enabled');
+        if (chkAuto) chkAuto.checked = !!cfg.auto_trade_enabled;
+
+        const radTest = document.getElementById('radio-testnet');
+        const radMain = document.getElementById('radio-mainnet');
+        if (cfg.is_testnet) {
+          if (radTest) radTest.checked = true;
+        } else {
+          if (radMain) radMain.checked = true;
+        }
+
+        const inpKey = document.getElementById('input-api-key');
+        if (inpKey) inpKey.value = cfg.api_key || '';
+
+        const lblKey = document.getElementById('label-masked-key');
+        if (lblKey) lblKey.innerText = cfg.api_key_masked ? `(Hiện tại: ${cfg.api_key_masked})` : '';
+
+        const inpSec = document.getElementById('input-api-secret');
+        if (inpSec) inpSec.value = '';
+
+        const lblSec = document.getElementById('label-masked-secret');
+        if (lblSec) {
+          lblSec.innerText = cfg.has_secret ? "✓ Đã lưu Secret (để trống nếu không đổi)" : "(Để trống nếu không đổi)";
+          lblSec.className = cfg.has_secret ? "text-[11px] text-emerald-400 font-mono" : "text-[11px] text-gray-500 font-sans";
+        }
+
+        const inpWeb = document.getElementById('input-webhook-url');
+        if (inpWeb) inpWeb.value = cfg.webhook_url || '';
+
+      } catch (e) {
+        console.error("Lỗi nạp cấu hình sàn:", e);
+      }
+
+      document.getElementById('exchangeModal').classList.remove('hidden');
+    }
+
+    function closeExchangeModal() {
+      document.getElementById('exchangeModal').classList.add('hidden');
+    }
+
+    async function toggleAutoTrade() {
+      try {
+        const res = await fetch('/api/settings/autotrade/toggle', { method: 'POST' });
+        const resp = await res.json();
+        if (resp.status === 'SUCCESS') {
+          await fetchDashboardData();
+        }
+      } catch (err) {
+        alert("Lỗi bật/tắt Auto-Trade: " + err);
+      }
+    }
+
+    async function testExchangeConnection() {
+      const btn = document.getElementById('btn-test-connection');
+      const msg = document.getElementById('exchange-modal-msg');
+      const oldText = btn.innerHTML;
+
+      const isTestnet = document.getElementById('radio-testnet')?.checked ?? true;
+      const apiKey = document.getElementById('input-api-key')?.value.trim() || '';
+      const apiSecret = document.getElementById('input-api-secret')?.value.trim() || '';
+      const webhookUrl = document.getElementById('input-webhook-url')?.value.trim() || '';
+
+      btn.disabled = true;
+      btn.innerHTML = 'Đang kiểm tra kết nối...';
+      msg.className = "p-3 rounded-lg text-xs font-sans bg-blue-500/10 border border-blue-500/30 text-blue-300";
+      msg.innerText = "Đang gửi ping xác thực tới sàn...";
+      msg.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/exchange/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            exchange: selectedExchange,
+            api_key: apiKey,
+            api_secret: apiSecret,
+            is_testnet: isTestnet,
+            webhook_url: webhookUrl
+          })
+        });
+        const result = await res.json();
+
+        if (result.success) {
+          msg.className = "p-3 rounded-lg text-xs font-sans bg-emerald-500/10 border border-emerald-500/30 text-emerald-300";
+          msg.innerText = "✓ Kết Nối Sàn Thành Công! " + (result.message || "");
+        } else {
+          msg.className = "p-3 rounded-lg text-xs font-sans bg-rose-500/10 border border-rose-500/30 text-rose-300";
+          msg.innerText = "✕ Kết Nối Thất Bại: " + (result.message || "Không thể xác thực API sàn");
+        }
+      } catch (err) {
+        msg.className = "p-3 rounded-lg text-xs font-sans bg-rose-500/10 border border-rose-500/30 text-rose-300";
+        msg.innerText = "✕ Lỗi yêu cầu: " + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = oldText;
+      }
+    }
+
+    async function saveExchangeConfig() {
+      const btn = document.getElementById('btn-save-exchange');
+      const msg = document.getElementById('exchange-modal-msg');
+
+      const isTestnet = document.getElementById('radio-testnet')?.checked ?? true;
+      const autoTradeEnabled = document.getElementById('modal-autotrade-enabled')?.checked ?? false;
+      const apiKey = document.getElementById('input-api-key')?.value.trim() || '';
+      const apiSecret = document.getElementById('input-api-secret')?.value.trim() || '';
+      const webhookUrl = document.getElementById('input-webhook-url')?.value.trim() || '';
+
+      btn.disabled = true;
+      btn.innerText = "Đang lưu cấu hình...";
+
+      try {
+        const res = await fetch('/api/settings/exchange', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            exchange: selectedExchange,
+            api_key: apiKey,
+            api_secret: apiSecret,
+            is_testnet: isTestnet,
+            auto_trade_enabled: autoTradeEnabled,
+            webhook_url: webhookUrl
+          })
+        });
+        const resp = await res.json();
+
+        if (resp.status === 'SUCCESS') {
+          msg.className = "p-3 rounded-lg text-xs font-sans bg-emerald-500/10 border border-emerald-500/30 text-emerald-300";
+          msg.innerText = `✓ ${resp.message} Auto-Trade đang: ${autoTradeEnabled ? 'BẬT' : 'TẮT'}`;
+          msg.classList.remove('hidden');
+
+          await fetchDashboardData();
+
+          setTimeout(() => {
+            closeExchangeModal();
+          }, 1000);
+        } else {
+          throw new Error(resp.message || "Lỗi lưu cấu hình");
+        }
+      } catch (err) {
+        msg.className = "p-3 rounded-lg text-xs font-sans bg-rose-500/10 border border-rose-500/30 text-rose-300";
+        msg.innerText = "✕ Lỗi: " + err.message;
+        msg.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.innerText = "Lưu Cấu Hình";
       }
     }
 
@@ -883,38 +1272,100 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('last-updated').innerText = new Date().toLocaleTimeString();
         document.getElementById('signal-count').innerText = `${data.signals.length} tín hiệu`;
 
-        // Update table
+        // Update signals table
         const tbody = document.getElementById('signals-tbody');
         if (data.signals.length === 0) {
           tbody.innerHTML = '<tr><td colspan="10" class="py-8 text-center text-gray-500 font-sans">Chưa có tín hiệu nào. Nhấn "Quét Thị Trường Ngay" để quét.</td></tr>';
-          return;
+        } else {
+          tbody.innerHTML = data.signals.map(s => {
+            const isApprove = s.ai_decision === 'APPROVE';
+            const badgeClass = isApprove ? 'badge-approve' : 'badge-reject';
+            const icon = isApprove ? '🛡️' : '⛔';
+            return `
+              <tr class="hover:bg-brand-dark/40 transition-colors">
+                <td class="py-3 px-4 font-semibold text-white">#${s.id}</td>
+                <td class="py-3 px-4 text-gray-400">${s.created_at || s.timestamp}</td>
+                <td class="py-3 px-4 font-bold text-white">${s.symbol}</td>
+                <td class="py-3 px-4 text-emerald-400">$${Number(s.entry_price).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                <td class="py-3 px-4 text-rose-400">$${Number(s.stop_loss).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                <td class="py-3 px-4 text-blue-400">$${Number(s.take_profit).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                <td class="py-3 px-4 text-gray-300">${s.position_size}</td>
+                <td class="py-3 px-4 text-yellow-400 font-semibold">1:${s.risk_reward_ratio}</td>
+                <td class="py-3 px-4">
+                  <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold ${badgeClass}">
+                    ${icon} ${s.ai_decision} (${Math.round(s.ai_confidence * 100)}%)
+                  </span>
+                </td>
+                <td class="py-3 px-4 text-xs font-sans text-gray-300 max-w-md truncate" title="${s.ai_reasoning || ''}">
+                  ${s.ai_reasoning || 'Không có ghi chú'}
+                </td>
+              </tr>
+            `;
+          }).join('');
         }
 
-        tbody.innerHTML = data.signals.map(s => {
-          const isApprove = s.ai_decision === 'APPROVE';
-          const badgeClass = isApprove ? 'badge-approve' : 'badge-reject';
-          const icon = isApprove ? '🛡️' : '⛔';
-          return `
-            <tr class="hover:bg-brand-dark/40 transition-colors">
-              <td class="py-3 px-4 font-semibold text-white">#${s.id}</td>
-              <td class="py-3 px-4 text-gray-400">${s.created_at || s.timestamp}</td>
-              <td class="py-3 px-4 font-bold text-white">${s.symbol}</td>
-              <td class="py-3 px-4 text-emerald-400">$${Number(s.entry_price).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
-              <td class="py-3 px-4 text-rose-400">$${Number(s.stop_loss).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
-              <td class="py-3 px-4 text-blue-400">$${Number(s.take_profit).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
-              <td class="py-3 px-4 text-gray-300">${s.position_size}</td>
-              <td class="py-3 px-4 text-yellow-400 font-semibold">1:${s.risk_reward_ratio}</td>
-              <td class="py-3 px-4">
-                <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold ${badgeClass}">
-                  ${icon} ${s.ai_decision} (${Math.round(s.ai_confidence * 100)}%)
-                </span>
-              </td>
-              <td class="py-3 px-4 text-xs font-sans text-gray-300 max-w-md truncate" title="${s.ai_reasoning || ''}">
-                ${s.ai_reasoning || 'Không có ghi chú'}
-              </td>
-            </tr>
-          `;
-        }).join('');
+        // Update Auto-Trade toggle button in header
+        if (data.auto_trade) {
+          const atBtn = document.getElementById('btn-autotrade-toggle');
+          const atDot = document.getElementById('autotrade-dot');
+          const atTxt = document.getElementById('autotrade-badge-text');
+          if (atBtn && atDot && atTxt) {
+            if (data.auto_trade.enabled) {
+              atBtn.className = "px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25 active:scale-95 shadow-sm";
+              atDot.className = "w-2 h-2 rounded-full bg-emerald-500 animate-pulse";
+              const exName = (data.auto_trade.exchange || 'binance').toUpperCase();
+              const netLabel = data.auto_trade.is_testnet ? 'TESTNET' : 'REAL';
+              atTxt.innerText = `Auto-Trade: BẬT (${exName} ${netLabel})`;
+            } else {
+              atBtn.className = "px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all bg-rose-500/15 border border-rose-500/30 text-rose-400 hover:bg-rose-500/25 active:scale-95 shadow-sm";
+              atDot.className = "w-2 h-2 rounded-full bg-rose-500";
+              atTxt.innerText = "Auto-Trade: TẮT";
+            }
+          }
+        }
+
+        // Update Executed Orders table
+        const execTbody = document.getElementById('executed-orders-tbody');
+        const execCount = document.getElementById('executed-order-count');
+        const orders = data.executed_orders || [];
+        if (execCount) execCount.innerText = `${orders.length} lệnh`;
+
+        if (execTbody) {
+          if (orders.length === 0) {
+            execTbody.innerHTML = '<tr><td colspan="10" class="py-8 text-center text-gray-500 font-sans">Chưa có lệnh tự động nào được gửi lên sàn. Bật Auto-Trade để tự động vào lệnh khi AI APPROVE.</td></tr>';
+          } else {
+            execTbody.innerHTML = orders.map(o => {
+              const isFilled = o.status === 'FILLED' || o.status === 'SUBMITTED' || o.status === 'SENT';
+              const statusClass = isFilled ? 'badge-approve' : (o.status === 'REJECTED' || o.status === 'FAILED' ? 'badge-reject' : 'badge-wait');
+              const exBadge = o.exchange === 'binance' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : (o.exchange === 'bybit' ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30' : 'bg-blue-500/20 text-blue-300 border border-blue-500/30');
+              const netBadge = o.is_testnet ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/15 text-rose-400 border border-rose-500/30';
+              const sideClass = o.side === 'BUY' ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold';
+
+              return `
+                <tr class="hover:bg-brand-dark/40 transition-colors">
+                  <td class="py-3 px-4 font-semibold text-white">#${o.id}</td>
+                  <td class="py-3 px-4 text-gray-400">${o.created_at || '--'}</td>
+                  <td class="py-3 px-4">
+                    <span class="px-2 py-0.5 rounded text-[10px] font-bold ${exBadge}">${(o.exchange || 'binance').toUpperCase()}</span>
+                  </td>
+                  <td class="py-3 px-4">
+                    <span class="px-2 py-0.5 rounded text-[10px] font-bold ${netBadge}">${o.is_testnet ? 'TESTNET' : 'REAL'}</span>
+                  </td>
+                  <td class="py-3 px-4 font-bold text-white">${o.symbol}</td>
+                  <td class="py-3 px-4 ${sideClass}">${o.side} ${o.order_type || 'LIMIT'}</td>
+                  <td class="py-3 px-4 text-emerald-400 font-semibold">$${Number(o.price || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                  <td class="py-3 px-4 text-gray-300">${o.quantity}</td>
+                  <td class="py-3 px-4">
+                    <span class="px-2 py-0.5 rounded text-[11px] font-bold ${statusClass}">${o.status}</span>
+                  </td>
+                  <td class="py-3 px-4 text-xs font-mono text-gray-400 max-w-xs truncate" title="${o.error_message || o.order_id || ''}">
+                    ${o.order_id ? 'Order: ' + o.order_id : (o.error_message || '--')}
+                  </td>
+                </tr>
+              `;
+            }).join('');
+          }
+        }
 
       } catch (err) {
         console.error("Lỗi cập nhật dashboard:", err);
@@ -992,6 +1443,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
             signals = db._execute("SELECT * FROM trade_signals ORDER BY id DESC LIMIT 50", fetch="all")
             positions = db.get_active_positions()
+            executed_orders = db.get_executed_orders(limit=25)
+            ex_cfg = db.get_exchange_config()
 
             payload = {
                 "account": {
@@ -1000,16 +1453,49 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     "risk_per_trade_usd": risk_per_trade_usd,
                     "daily_loss_limit_usd": daily_loss_limit_usd
                 },
+                "auto_trade": {
+                    "enabled": db.is_auto_trade_enabled(),
+                    "exchange": ex_cfg.get("exchange", "binance"),
+                    "is_testnet": ex_cfg.get("is_testnet", True),
+                    "has_key": bool(ex_cfg.get("api_key")),
+                    "api_key_masked": (ex_cfg.get("api_key")[:6] + "...") if len(ex_cfg.get("api_key", "")) > 6 else ""
+                },
                 "guardrails": report,
                 "journal": stats,
                 "signals": signals,
-                "positions": positions
+                "positions": positions,
+                "executed_orders": executed_orders
             }
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
             self.wfile.write(json.dumps(payload, default=str).encode("utf-8"))
+
+        elif url.path == "/api/settings/exchange":
+            db = DatabaseManager(self.db_path)
+            cfg = db.get_exchange_config()
+            cfg_resp = {
+                "exchange": cfg.get("exchange", "binance"),
+                "api_key": cfg.get("api_key", ""),
+                "api_key_masked": (cfg.get("api_key")[:6] + "...") if len(cfg.get("api_key", "")) > 6 else "",
+                "has_secret": bool(cfg.get("api_secret")),
+                "is_testnet": cfg.get("is_testnet", True),
+                "auto_trade_enabled": db.is_auto_trade_enabled(),
+                "webhook_url": cfg.get("webhook_url", "")
+            }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(cfg_resp).encode("utf-8"))
+
+        elif url.path == "/api/executed-orders":
+            db = DatabaseManager(self.db_path)
+            orders = db.get_executed_orders(limit=50)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(orders, default=str).encode("utf-8"))
 
         else:
             self.send_response(404)
@@ -1031,6 +1517,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
         elif url.path == "/api/settings/equity":
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
@@ -1073,6 +1560,125 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
+        elif url.path == "/api/settings/exchange":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                post_data = self.rfile.read(content_length).decode("utf-8")
+                body = json.loads(post_data)
+
+                exchange = str(body.get("exchange", "binance")).lower().strip()
+                api_key = str(body.get("api_key", "")).strip()
+                api_secret = str(body.get("api_secret", "")).strip()
+                is_testnet = bool(body.get("is_testnet", True))
+                auto_trade_enabled = bool(body.get("auto_trade_enabled", False))
+                webhook_url = str(body.get("webhook_url", "")).strip()
+
+                db = DatabaseManager(self.db_path)
+                db.save_exchange_config(
+                    exchange=exchange,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    is_testnet=is_testnet,
+                    auto_trade_enabled=auto_trade_enabled,
+                    webhook_url=webhook_url
+                )
+                db.log_audit_event(
+                    "EXCHANGE_CONFIG_SAVED",
+                    f"Đã lưu cấu hình sàn {exchange.upper()} ({'Testnet' if is_testnet else 'Mainnet'}) | Auto-Trade: {auto_trade_enabled}",
+                    {"exchange": exchange, "is_testnet": is_testnet, "auto_trade_enabled": auto_trade_enabled}
+                )
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "SUCCESS", "message": "Đã lưu cài đặt sàn thành công!"}).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
+        elif url.path == "/api/settings/autotrade/toggle":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                post_data = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+                body = json.loads(post_data) if post_data else {}
+
+                db = DatabaseManager(self.db_path)
+                current = db.is_auto_trade_enabled()
+                new_state = body.get("enabled", not current)
+                db.set_auto_trade_enabled(new_state)
+                db.log_audit_event("AUTO_TRADE_TOGGLED", f"Auto-Trade chuyển sang: {'BẬT' if new_state else 'TẮT'}")
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "SUCCESS", "auto_trade_enabled": new_state}).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
+        elif url.path == "/api/exchange/test":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                post_data = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+                body = json.loads(post_data) if post_data else {}
+
+                db = DatabaseManager(self.db_path)
+                saved_cfg = db.get_exchange_config()
+
+                exchange = body.get("exchange") or saved_cfg.get("exchange", "binance")
+                api_key = body.get("api_key") or saved_cfg.get("api_key", "")
+                api_secret = body.get("api_secret") or saved_cfg.get("api_secret", "")
+                is_testnet = body.get("is_testnet") if "is_testnet" in body else saved_cfg.get("is_testnet", True)
+                webhook_url = body.get("webhook_url") or saved_cfg.get("webhook_url", "")
+
+                test_cfg = {
+                    "exchange": exchange,
+                    "api_key": api_key,
+                    "api_secret": api_secret,
+                    "is_testnet": is_testnet,
+                    "webhook_url": webhook_url
+                }
+                executor = OrderExecutor(db=db)
+                client = executor.get_client_for_config(test_cfg)
+                if not client:
+                    res = {"success": False, "message": "Vui lòng nhập đầy đủ API Key và Secret trước khi kiểm tra."}
+                else:
+                    res = client.test_connection()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(res, default=str).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
+        elif url.path == "/api/webhook/tradingview":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                post_data = self.rfile.read(content_length).decode("utf-8")
+                body = json.loads(post_data) if post_data else {}
+
+                db = DatabaseManager(self.db_path)
+                db.log_audit_event("TRADINGVIEW_WEBHOOK_RECEIVED", f"Nhận alert từ TradingView: {body}")
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "RECEIVED", "payload": body}).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
         else:
             self.send_response(404)
             self.end_headers()

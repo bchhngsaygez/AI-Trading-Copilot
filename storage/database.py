@@ -103,12 +103,36 @@ class DatabaseManager:
             );
             """)
 
-            # 4. Bảng app_settings: Lưu trữ cài đặt người dùng (Vốn, Tỷ lệ rủi ro)
+            # 4. Bảng app_settings: Lưu trữ cài đặt người dùng (Vốn, Tỷ lệ rủi ro, API sàn)
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # 5. Bảng executed_orders: Nhật ký lệnh tự động đã gửi lên sàn
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS executed_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER,
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                order_id TEXT,
+                client_order_id TEXT,
+                status TEXT DEFAULT 'SUBMITTED',
+                sl_order_id TEXT,
+                tp_order_id TEXT,
+                is_testnet INTEGER DEFAULT 1,
+                error_message TEXT,
+                raw_response TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(signal_id) REFERENCES trade_signals(id)
             );
             """)
             conn.commit()
@@ -146,6 +170,89 @@ class DatabaseManager:
         """Lấy tỷ lệ rủi ro hiện tại (%)"""
         val = self.get_setting("risk_percent")
         return float(val) if val is not None else float(default)
+
+    # Cấu hình sàn giao dịch & Tự động đặt lệnh (Auto-Trade)
+    def save_exchange_config(
+        self,
+        exchange: str,
+        api_key: str,
+        api_secret: str,
+        is_testnet: bool = True,
+        auto_trade_enabled: bool = False,
+        webhook_url: Optional[str] = None
+    ):
+        """Lưu thông tin API Key sàn giao dịch & tùy chọn Auto-Trade"""
+        import os
+        self.set_setting("exchange_name", exchange.lower().strip())
+        self.set_setting("exchange_api_key", api_key.strip())
+        if api_secret:  # Chỉ cập nhật nếu có secret mới
+            self.set_setting("exchange_api_secret", api_secret.strip())
+        self.set_setting("exchange_is_testnet", "1" if is_testnet else "0")
+        self.set_setting("auto_trade_enabled", "1" if auto_trade_enabled else "0")
+        if webhook_url is not None:
+            self.set_setting("exchange_webhook_url", webhook_url.strip())
+
+    def get_exchange_config(self) -> Dict[str, Any]:
+        """Lấy cấu hình sàn giao dịch và cờ bật/tắt Auto-Trade"""
+        import os
+        return {
+            "exchange": self.get_setting("exchange_name", os.environ.get("EXCHANGE_NAME", "binance")),
+            "api_key": self.get_setting("exchange_api_key", os.environ.get("EXCHANGE_API_KEY", "")),
+            "api_secret": self.get_setting("exchange_api_secret", os.environ.get("EXCHANGE_API_SECRET", "")),
+            "is_testnet": self.get_setting("exchange_is_testnet", os.environ.get("EXCHANGE_IS_TESTNET", "1")) == "1",
+            "auto_trade_enabled": self.get_setting("auto_trade_enabled", os.environ.get("AUTO_TRADE_ENABLED", "0")) == "1",
+            "webhook_url": self.get_setting("exchange_webhook_url", os.environ.get("EXCHANGE_WEBHOOK_URL", ""))
+        }
+
+    def is_auto_trade_enabled(self) -> bool:
+        """Kiểm tra cờ tự động đặt lệnh có đang kích hoạt không"""
+        return self.get_setting("auto_trade_enabled", "0") == "1"
+
+    def set_auto_trade_enabled(self, enabled: bool):
+        """Bật hoặc tắt tính năng tự động đặt lệnh"""
+        self.set_setting("auto_trade_enabled", "1" if enabled else "0")
+
+    def record_executed_order(
+        self,
+        signal_id: Optional[int],
+        exchange: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        price: float,
+        quantity: float,
+        order_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+        status: str = "SUBMITTED",
+        sl_order_id: Optional[str] = None,
+        tp_order_id: Optional[str] = None,
+        is_testnet: bool = True,
+        error_message: Optional[str] = None,
+        raw_response: Optional[Dict[str, Any]] = None
+    ) -> int:
+        """Lưu bản ghi lệnh tự động vào bảng executed_orders"""
+        query = """
+        INSERT INTO executed_orders (
+            signal_id, exchange, symbol, side, order_type, price, quantity,
+            order_id, client_order_id, status, sl_order_id, tp_order_id,
+            is_testnet, error_message, raw_response
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        raw_str = json.dumps(raw_response or {}) if isinstance(raw_response, dict) else str(raw_response or "")
+        return self._execute(
+            query,
+            (
+                signal_id, exchange, symbol, side, order_type, price, quantity,
+                order_id, client_order_id, status, sl_order_id, tp_order_id,
+                1 if is_testnet else 0, error_message, raw_str
+            ),
+            fetch="lastrowid"
+        )
+
+    def get_executed_orders(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Lấy danh sách các lệnh tự động đã thực thi gần nhất"""
+        query = "SELECT * FROM executed_orders ORDER BY id DESC LIMIT ?"
+        return self._execute(query, (limit,), fetch="all")
 
     def record_signal(
         self,

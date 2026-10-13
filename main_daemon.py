@@ -32,6 +32,7 @@ from core.copilot_agent import AICopilotAgent
 from storage.database import DatabaseManager
 from guardrails.risk_guardrails import RiskGuardrails
 from alerts.telegram_bot import AlertDispatcher
+from execution.order_executor import OrderExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,6 +110,9 @@ class TradingCopilotSystem:
             chat_id=tg_cfg.get("chat_id", ""),
             enable_color=alert_cfg.get("cli_color", True)
         )
+
+        # 7. Khởi tạo Order Executor (Tự động đặt lệnh sàn khi AI APPROVE)
+        self.order_executor = OrderExecutor(db=self.db)
 
     def _load_config(self, path: str) -> dict:
         if not os.path.exists(path):
@@ -269,10 +273,26 @@ class TradingCopilotSystem:
         self.dispatcher.print_terminal_card(signal_id, symbol, proposal_dict, ai_result)
         self.dispatcher.send_telegram_alert(signal_id, symbol, proposal_dict, ai_result)
 
+        # 7. TỰ ĐỘNG ĐẶT LỆNH SÀN (AUTO-TRADE) KHI AI COPILOT APPROVE
+        if ai_decision == "APPROVE":
+            if self.db.is_auto_trade_enabled():
+                logger.info(f"⚡ [AUTO-TRADE]: AI APPROVE cho {symbol}! Tiến hành gửi lệnh lên sàn...")
+                exec_res = self.order_executor.execute_signal(symbol, proposal_dict, ai_result, signal_id)
+                self.dispatcher.send_auto_trade_alert(symbol, proposal_dict, exec_res)
+                if exec_res.get("executed"):
+                    print(f"✅ [AUTO-TRADE EXECUTED]: Đã đặt lệnh {proposal.action} {symbol} thành công trên sàn {exec_res.get('exchange', '').upper()} (Order #{exec_res.get('order_id')})!")
+                else:
+                    print(f"⚠️ [AUTO-TRADE FAILED]: Đặt lệnh {symbol} thất bại: {exec_res.get('message')}")
+            else:
+                logger.info(f"ℹ️ [AUTO-TRADE]: AI phê duyệt APPROVE cho {symbol} nhưng Auto-Trade đang TẮT.")
+
         return signal_id
 
     def run_scanner_cycle(self):
         """Chạy một chu kỳ quét tất cả các cặp trong watchlist"""
+        # Lắng nghe và xử lý lệnh điều khiển Telegram Bot (/autotrade on/off, /setkeys, /testkeys)
+        self.dispatcher.poll_telegram_updates(self.db, self.order_executor)
+
         # 0. Đồng bộ cấu hình vốn & tỷ lệ rủi ro từ Database nếu người dùng đã cập nhật
         current_equity = self.db.get_account_equity(default=self.risk_engine.account_equity)
         current_risk_pct = self.db.get_risk_percent(default=self.risk_engine.risk_percent)
@@ -330,10 +350,17 @@ class TradingCopilotSystem:
         curr_risk = self.db.get_risk_percent(default=self.risk_engine.risk_percent)
         risk_usd = round(curr_eq * (curr_risk / 100.0), 2)
 
+        cfg = self.db.get_exchange_config()
+        is_auto = self.db.is_auto_trade_enabled()
+        env_str = "Testnet (Demo)" if cfg.get("is_testnet") else "MAINNET REAL"
+        masked_key = (cfg.get("api_key")[:6] + "...") if len(cfg.get("api_key", "")) > 6 else "(Chưa điền)"
+
         print("\n" + "=" * 65)
         print("📊 BÁO CÁO TRẠNG THÁI HỆ THỐNG (SYSTEM HEALTH & GUARDRAILS)")
         print("=" * 65)
         print(f"• Vốn khả dụng thiết lập   : ${curr_eq:,.2f} USD (Rủi ro: {curr_risk}% = ${risk_usd:,.2f}/lệnh)")
+        print(f"• Tự động đặt lệnh (Auto)  : {'[ BẬT - SẴN SÀNG ]' if is_auto else '[ TẮT ]'} | Sàn: {cfg.get('exchange', 'binance').upper()} ({env_str})")
+        print(f"• API Key sàn cấu hình     : {masked_key}")
         print(f"• Lãi/Lỗ trong ngày (UTC) : ${report['daily_pnl_usd']:,.2f} USD (Giới hạn: -${report['daily_loss_limit_usd']:.2f})")
         print(f"• Daily Circuit Breaker    : {'[ KÍCH HOẠT KHÓA ]' if report['daily_circuit_breaker_active'] else '[ AN TOÀN ]'}")
         print(f"• Số vị thế đang mở        : {report['active_positions_count']}/{report['max_open_positions_allowed']}")
