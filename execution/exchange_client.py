@@ -48,7 +48,13 @@ class BinanceFuturesClient(BaseExchangeClient):
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
         self.is_testnet = is_testnet
-        self.base_url = "https://testnet.binancefuture.com" if is_testnet else "https://fapi.binance.com"
+        # Hỗ trợ cả Binance Demo Trading (demo-fapi.binance.com) và Testnet truyền thống (testnet.binancefuture.com)
+        self.candidate_urls = (
+            ["https://demo-fapi.binance.com", "https://testnet.binancefuture.com"]
+            if is_testnet
+            else ["https://fapi.binance.com"]
+        )
+        self.base_url = self.candidate_urls[0]
         self.session = requests.Session()
         self.session.headers.update({
             "X-MBX-APIKEY": self.api_key,
@@ -68,36 +74,41 @@ class BinanceFuturesClient(BaseExchangeClient):
         return f"{query_string}&signature={signature}"
 
     def test_connection(self) -> Dict[str, Any]:
-        """Kiểm tra tính hợp lệ của API Key và lấy số dư tài khoản Futures"""
+        """Kiểm tra tính hợp lệ của API Key và lấy số dư tài khoản Futures (tự động thử các endpoint Demo/Testnet)"""
         if not self.api_key or not self.api_secret:
             return {"success": False, "message": "Chưa cung cấp API Key hoặc Secret."}
 
-        url = f"{self.base_url}/fapi/v2/balance"
-        try:
-            signed_query = self._sign_params({})
-            resp = self.session.get(f"{url}?{signed_query}", timeout=8.0)
-            if resp.status_code == 200:
-                balances = resp.json()
-                usdt_bal = next((b for b in balances if b.get("asset") == "USDT"), None)
-                available = float(usdt_bal.get("availableBalance", 0.0)) if usdt_bal else 0.0
-                env_tag = "Testnet" if self.is_testnet else "Mainnet"
-                return {
-                    "success": True,
-                    "exchange": "binance",
-                    "is_testnet": self.is_testnet,
-                    "available_balance": available,
-                    "message": f"Kết nối Binance Futures ({env_tag}) thành công! Số dư khả dụng: ${available:,.2f} USDT"
-                }
-            else:
-                err = resp.json() if resp.headers.get("content-type") == "application/json" else resp.text
-                return {
-                    "success": False,
-                    "exchange": "binance",
-                    "status_code": resp.status_code,
-                    "message": f"Lỗi Binance (HTTP {resp.status_code}): {err}"
-                }
-        except Exception as e:
-            return {"success": False, "exchange": "binance", "message": f"Lỗi kết nối mạng: {str(e)}"}
+        last_error = ""
+        for url in self.candidate_urls:
+            endpoint = f"{url}/fapi/v2/balance"
+            try:
+                signed_query = self._sign_params({})
+                resp = self.session.get(f"{endpoint}?{signed_query}", timeout=8.0)
+                if resp.status_code == 200:
+                    self.base_url = url
+                    balances = resp.json()
+                    usdt_bal = next((b for b in balances if b.get("asset") == "USDT"), None)
+                    available = float(usdt_bal.get("availableBalance", 0.0)) if usdt_bal else 0.0
+                    env_tag = "Demo/Testnet" if self.is_testnet else "Mainnet"
+                    return {
+                        "success": True,
+                        "exchange": "binance",
+                        "is_testnet": self.is_testnet,
+                        "base_url": self.base_url,
+                        "available_balance": available,
+                        "message": f"Kết nối Binance Futures ({env_tag}) thành công! Số dư khả dụng: ${available:,.2f} USDT"
+                    }
+                else:
+                    err = resp.json() if resp.headers.get("content-type") == "application/json" else resp.text
+                    last_error = f"(HTTP {resp.status_code}): {err}"
+            except Exception as e:
+                last_error = str(e)
+
+        return {
+            "success": False,
+            "exchange": "binance",
+            "message": f"Lỗi Binance {last_error}"
+        }
 
     def place_order(
         self,
@@ -118,7 +129,6 @@ class BinanceFuturesClient(BaseExchangeClient):
         opp_side = "SELL" if norm_side == "BUY" else "BUY"
 
         # 1. Đặt Lệnh Chính (Main Entry Order)
-        order_url = f"{self.base_url}/fapi/v1/order"
         params = {
             "symbol": clean_symbol,
             "side": norm_side,
@@ -130,16 +140,23 @@ class BinanceFuturesClient(BaseExchangeClient):
             params["timeInForce"] = "GTC"
 
         try:
-            signed_query = self._sign_params(params)
-            resp = self.session.post(f"{order_url}?{signed_query}", timeout=8.0)
-            data = resp.json()
+            resp = None
+            data = None
+            for candidate in self.candidate_urls:
+                order_url = f"{candidate}/fapi/v1/order"
+                signed_query = self._sign_params(params)
+                resp = self.session.post(f"{order_url}?{signed_query}", timeout=8.0)
+                data = resp.json()
+                if resp.status_code == 200:
+                    self.base_url = candidate
+                    break
 
-            if resp.status_code != 200:
+            if not resp or resp.status_code != 200:
                 logger.error(f"Binance đặt lệnh chính thất bại: {data}")
                 return {
                     "success": False,
                     "exchange": "binance",
-                    "error": data.get("msg", str(data)),
+                    "error": data.get("msg", str(data)) if isinstance(data, dict) else str(data),
                     "raw": data
                 }
 
