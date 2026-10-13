@@ -20,6 +20,21 @@ import requests
 logger = logging.getLogger("ExchangeClient")
 
 
+def format_symbol_price(symbol: str, price: float) -> float:
+    """Format giá theo chuẩn tick size Futures (2 số thập phân)"""
+    return round(float(price), 2)
+
+
+def format_symbol_quantity(symbol: str, quantity: float) -> float:
+    """Format khối lượng theo step size hợp lệ của từng coin Futures"""
+    clean = symbol.replace("/", "").upper()
+    if "BTC" in clean or "ETH" in clean:
+        return round(float(quantity), 3)
+    elif "SOL" in clean:
+        return round(float(quantity), 2)
+    return round(float(quantity), 3)
+
+
 class BaseExchangeClient:
     """Interface cơ sở cho các kết nối sàn giao dịch"""
     def test_connection(self) -> Dict[str, Any]:
@@ -36,6 +51,24 @@ class BaseExchangeClient:
         take_profit: Optional[float] = None
     ) -> Dict[str, Any]:
         raise NotImplementedError
+
+    def get_open_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Lấy thông tin vị thế đang mở trên sàn (nếu có)"""
+        return None
+
+    def has_open_orders(self, symbol: str) -> bool:
+        """Kiểm tra xem trên sàn có lệnh chờ đang mở không"""
+        return False
+
+    def attach_position_tpsl(
+        self,
+        symbol: str,
+        side: str,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Gắn trực tiếp TP và SL vào vị thế đang mở trên sàn"""
+        return {"success": False, "message": "Not implemented"}
 
 
 class BinanceFuturesClient(BaseExchangeClient):
@@ -110,6 +143,120 @@ class BinanceFuturesClient(BaseExchangeClient):
             "message": f"Lỗi Binance {last_error}"
         }
 
+    def get_open_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Lấy thông tin vị thế đang mở (nếu có) trên Binance Futures"""
+        clean_symbol = symbol.replace("/", "").upper()
+        url = f"{self.base_url}/fapi/v2/positionRisk"
+        try:
+            signed_query = self._sign_params({"symbol": clean_symbol})
+            resp = self.session.get(f"{url}?{signed_query}", timeout=8.0)
+            if resp.status_code == 200:
+                positions = resp.json()
+                for p in positions:
+                    if p.get("symbol") == clean_symbol:
+                        amt = float(p.get("positionAmt", 0.0))
+                        if abs(amt) > 0:
+                            return {
+                                "symbol": symbol,
+                                "clean_symbol": clean_symbol,
+                                "size": abs(amt),
+                                "side": "LONG" if amt > 0 else "SHORT",
+                                "entry_price": float(p.get("entryPrice", 0.0)),
+                                "mark_price": float(p.get("markPrice", 0.0)),
+                                "unrealized_pnl": float(p.get("unRealizedProfit", 0.0))
+                            }
+        except Exception as e:
+            logger.warning(f"Lỗi kiểm tra vị thế Binance ({symbol}): {e}")
+        return None
+
+    def has_open_orders(self, symbol: str) -> bool:
+        """Kiểm tra xem trên sàn có lệnh chờ (Pending Limit / Stop order) cho cặp coin này không"""
+        clean_symbol = symbol.replace("/", "").upper()
+        url = f"{self.base_url}/fapi/v1/openOrders"
+        try:
+            signed_query = self._sign_params({"symbol": clean_symbol})
+            resp = self.session.get(f"{url}?{signed_query}", timeout=8.0)
+            if resp.status_code == 200:
+                orders = resp.json()
+                return len(orders) > 0
+        except Exception as e:
+            logger.warning(f"Lỗi kiểm tra lệnh chờ Binance ({symbol}): {e}")
+        return False
+
+    def attach_position_tpsl(
+        self,
+        symbol: str,
+        side: str,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Gắn Stop Loss và Take Profit trực tiếp vào vị thế đang mở trên Binance Futures.
+        Sử dụng closePosition='true' và workingType='MARK_PRICE' để kích hoạt cột 'TP/SL for position'.
+        """
+        clean_symbol = symbol.replace("/", "").upper()
+        opp_side = "SELL" if side.upper() in ("LONG", "BUY") else "BUY"
+        order_url = f"{self.base_url}/fapi/v1/order"
+
+        sl_order_id = None
+        tp_order_id = None
+        errors = []
+
+        # 1. Gắn Stop Loss (STOP_MARKET)
+        if stop_loss and stop_loss > 0:
+            formatted_sl = format_symbol_price(clean_symbol, stop_loss)
+            sl_params = {
+                "symbol": clean_symbol,
+                "side": opp_side,
+                "type": "STOP_MARKET",
+                "stopPrice": formatted_sl,
+                "closePosition": "true",
+                "workingType": "MARK_PRICE"
+            }
+            try:
+                sl_query = self._sign_params(sl_params)
+                resp = self.session.post(f"{order_url}?{sl_query}", timeout=8.0)
+                data = resp.json()
+                if resp.status_code == 200:
+                    sl_order_id = str(data.get("orderId"))
+                    logger.info(f"✅ [BINANCE] Đã gắn Stop Loss {formatted_sl} vào vị thế {clean_symbol} (Order #{sl_order_id})")
+                else:
+                    errors.append(f"SL error: {data.get('msg', data)}")
+                    logger.warning(f"⚠️ [BINANCE] Không thể gắn SL cho vị thế {clean_symbol}: {data}")
+            except Exception as e:
+                errors.append(f"SL exception: {e}")
+
+        # 2. Gắn Take Profit (TAKE_PROFIT_MARKET)
+        if take_profit and take_profit > 0:
+            formatted_tp = format_symbol_price(clean_symbol, take_profit)
+            tp_params = {
+                "symbol": clean_symbol,
+                "side": opp_side,
+                "type": "TAKE_PROFIT_MARKET",
+                "stopPrice": formatted_tp,
+                "closePosition": "true",
+                "workingType": "MARK_PRICE"
+            }
+            try:
+                tp_query = self._sign_params(tp_params)
+                resp = self.session.post(f"{order_url}?{tp_query}", timeout=8.0)
+                data = resp.json()
+                if resp.status_code == 200:
+                    tp_order_id = str(data.get("orderId"))
+                    logger.info(f"✅ [BINANCE] Đã gắn Take Profit {formatted_tp} vào vị thế {clean_symbol} (Order #{tp_order_id})")
+                else:
+                    errors.append(f"TP error: {data.get('msg', data)}")
+                    logger.warning(f"⚠️ [BINANCE] Không thể gắn TP cho vị thế {clean_symbol}: {data}")
+            except Exception as e:
+                errors.append(f"TP exception: {e}")
+
+        return {
+            "success": bool(sl_order_id or tp_order_id),
+            "sl_order_id": sl_order_id,
+            "tp_order_id": tp_order_id,
+            "errors": errors
+        }
+
     def place_order(
         self,
         symbol: str,
@@ -122,21 +269,27 @@ class BinanceFuturesClient(BaseExchangeClient):
     ) -> Dict[str, Any]:
         """
         Đặt lệnh Limit Order lên Binance Futures kèm Stop Loss & Take Profit tự động.
+        Định dạng chính xác tick size và step size để chống lỗi -1111 Precision.
         """
-        # Chuẩn hóa symbol: "BTC/USDT" -> "BTCUSDT"
+        # Chuẩn hóa symbol & làm tròn theo chuẩn tick size sàn
         clean_symbol = symbol.replace("/", "").upper()
         norm_side = "BUY" if "BUY" in side.upper() else "SELL"
         opp_side = "SELL" if norm_side == "BUY" else "BUY"
+
+        f_price = format_symbol_price(clean_symbol, price)
+        f_qty = format_symbol_quantity(clean_symbol, quantity)
+        f_sl = format_symbol_price(clean_symbol, stop_loss) if stop_loss else None
+        f_tp = format_symbol_price(clean_symbol, take_profit) if take_profit else None
 
         # 1. Đặt Lệnh Chính (Main Entry Order)
         params = {
             "symbol": clean_symbol,
             "side": norm_side,
             "type": "LIMIT" if order_type.upper() == "LIMIT" else "MARKET",
-            "quantity": quantity
+            "quantity": f_qty
         }
         if order_type.upper() == "LIMIT":
-            params["price"] = price
+            params["price"] = f_price
             params["timeInForce"] = "GTC"
 
         try:
@@ -162,44 +315,50 @@ class BinanceFuturesClient(BaseExchangeClient):
 
             order_id = str(data.get("orderId"))
             client_oid = str(data.get("clientOrderId"))
+            order_status = data.get("status", "NEW")
             sl_order_id = None
             tp_order_id = None
 
-            # 2. Đặt Lệnh Stop Loss (STOP_MARKET)
-            if stop_loss and stop_loss > 0:
-                try:
-                    sl_params = {
-                        "symbol": clean_symbol,
-                        "side": opp_side,
-                        "type": "STOP_MARKET",
-                        "stopPrice": stop_loss,
-                        "closePosition": "true"
-                    }
-                    sl_query = self._sign_params(sl_params)
-                    sl_resp = self.session.post(f"{order_url}?{sl_query}", timeout=6.0)
-                    if sl_resp.status_code == 200:
-                        sl_order_id = str(sl_resp.json().get("orderId"))
-                        logger.info(f"Đã gắn Stop Loss {stop_loss} cho {clean_symbol} (Order #{sl_order_id})")
-                except Exception as sl_err:
-                    logger.warning(f"Lỗi khi gắn SL: {sl_err}")
-
-            # 3. Đặt Lệnh Take Profit (TAKE_PROFIT_MARKET)
-            if take_profit and take_profit > 0:
-                try:
-                    tp_params = {
-                        "symbol": clean_symbol,
-                        "side": opp_side,
-                        "type": "TAKE_PROFIT_MARKET",
-                        "stopPrice": take_profit,
-                        "closePosition": "true"
-                    }
-                    tp_query = self._sign_params(tp_params)
-                    tp_resp = self.session.post(f"{order_url}?{tp_query}", timeout=6.0)
-                    if tp_resp.status_code == 200:
-                        tp_order_id = str(tp_resp.json().get("orderId"))
-                        logger.info(f"Đã gắn Take Profit {take_profit} cho {clean_symbol} (Order #{tp_order_id})")
-                except Exception as tp_err:
-                    logger.warning(f"Lỗi khi gắn TP: {tp_err}")
+            # 2. Nếu lệnh khớp ngay hoặc đã có vị thế mở, gắn Position TP/SL lập tức
+            pos = self.get_open_position(symbol)
+            if pos and pos.get("size", 0.0) > 0:
+                tpsl_res = self.attach_position_tpsl(symbol, pos.get("side", norm_side), f_sl, f_tp)
+                sl_order_id = tpsl_res.get("sl_order_id")
+                tp_order_id = tpsl_res.get("tp_order_id")
+            else:
+                # Nếu lệnh Limit đang chờ trong sổ lệnh, thử gửi lệnh điều kiện đóng vị thế
+                if f_sl:
+                    try:
+                        sl_p = {
+                            "symbol": clean_symbol,
+                            "side": opp_side,
+                            "type": "STOP_MARKET",
+                            "stopPrice": f_sl,
+                            "closePosition": "true",
+                            "workingType": "MARK_PRICE"
+                        }
+                        sl_q = self._sign_params(sl_p)
+                        s_res = self.session.post(f"{self.base_url}/fapi/v1/order?{sl_q}", timeout=6.0)
+                        if s_res.status_code == 200:
+                            sl_order_id = str(s_res.json().get("orderId"))
+                    except Exception:
+                        pass
+                if f_tp:
+                    try:
+                        tp_p = {
+                            "symbol": clean_symbol,
+                            "side": opp_side,
+                            "type": "TAKE_PROFIT_MARKET",
+                            "stopPrice": f_tp,
+                            "closePosition": "true",
+                            "workingType": "MARK_PRICE"
+                        }
+                        tp_q = self._sign_params(tp_p)
+                        t_res = self.session.post(f"{self.base_url}/fapi/v1/order?{tp_q}", timeout=6.0)
+                        if t_res.status_code == 200:
+                            tp_order_id = str(t_res.json().get("orderId"))
+                    except Exception:
+                        pass
 
             return {
                 "success": True,
@@ -209,7 +368,7 @@ class BinanceFuturesClient(BaseExchangeClient):
                 "client_order_id": client_oid,
                 "sl_order_id": sl_order_id,
                 "tp_order_id": tp_order_id,
-                "status": data.get("status", "NEW"),
+                "status": order_status,
                 "raw": data
             }
 
@@ -280,6 +439,49 @@ class BybitPerpetualClient(BaseExchangeClient):
                 }
         except Exception as e:
             return {"success": False, "exchange": "bybit", "message": f"Lỗi kết nối Bybit: {str(e)}"}
+
+    def get_open_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Lấy thông tin vị thế đang mở trên Bybit V5"""
+        clean_symbol = symbol.replace("/", "").upper()
+        url = f"{self.base_url}/v5/position/list?category=linear&symbol={clean_symbol}"
+        query_str = f"category=linear&symbol={clean_symbol}"
+        try:
+            headers = self._get_headers(query_str)
+            resp = self.session.get(url, headers=headers, timeout=8.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                positions = data.get("result", {}).get("list", [])
+                for p in positions:
+                    size = float(p.get("size", 0.0))
+                    if size > 0:
+                        return {
+                            "symbol": symbol,
+                            "clean_symbol": clean_symbol,
+                            "size": size,
+                            "side": "LONG" if p.get("side", "").upper() == "BUY" else "SHORT",
+                            "entry_price": float(p.get("avgPrice", 0.0)),
+                            "mark_price": float(p.get("markPrice", 0.0)),
+                            "unrealized_pnl": float(p.get("unrealisedPnl", 0.0))
+                        }
+        except Exception as e:
+            logger.warning(f"Lỗi kiểm tra vị thế Bybit ({symbol}): {e}")
+        return None
+
+    def has_open_orders(self, symbol: str) -> bool:
+        """Kiểm tra lệnh chờ trên Bybit V5"""
+        clean_symbol = symbol.replace("/", "").upper()
+        url = f"{self.base_url}/v5/order/realtime?category=linear&symbol={clean_symbol}"
+        query_str = f"category=linear&symbol={clean_symbol}"
+        try:
+            headers = self._get_headers(query_str)
+            resp = self.session.get(url, headers=headers, timeout=8.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                orders = data.get("result", {}).get("list", [])
+                return len(orders) > 0
+        except Exception as e:
+            logger.warning(f"Lỗi kiểm tra lệnh chờ Bybit ({symbol}): {e}")
+        return False
 
     def place_order(
         self,

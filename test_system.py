@@ -521,6 +521,8 @@ class TestExchangeExecutionAndAutoTrade(unittest.TestCase):
             auto_trade_enabled=True
         )
         mock_client = MagicMock()
+        mock_client.get_open_position.return_value = None
+        mock_client.has_open_orders.return_value = False
         mock_client.place_order.return_value = {
             "success": True,
             "order_id": "auto_ord_999",
@@ -535,6 +537,38 @@ class TestExchangeExecutionAndAutoTrade(unittest.TestCase):
             orders = self.db.get_executed_orders(limit=5)
             self.assertGreaterEqual(len(orders), 1)
             self.assertEqual(orders[0]["order_id"], "auto_ord_999")
+
+        # 4. IDEMPOTENCY: Chặn khi DB Cooldown đang kích hoạt
+        with patch.object(self.executor, 'get_client_for_config', return_value=mock_client):
+            res4 = self.executor.execute_signal("BTC/USDT", proposal, {"action_decision": "APPROVE"})
+            self.assertFalse(res4["executed"])
+            self.assertEqual(res4["reason"], "COOLDOWN_ACTIVE")
+
+        # 5. IDEMPOTENCY: Chặn khi sàn đã có vị thế mở (tránh dồn volume)
+        db_clean = DatabaseManager("storage/test_clean.db")
+        executor_clean = OrderExecutor(db_clean)
+        db_clean.save_exchange_config(exchange="binance", api_key="k", api_secret="s", is_testnet=True, auto_trade_enabled=True)
+        mock_client_with_pos = MagicMock()
+        mock_client_with_pos.get_open_position.return_value = {"symbol": "BTC/USDT", "size": 0.0114, "side": "LONG"}
+        mock_client_with_pos.has_open_orders.return_value = False
+        with patch.object(executor_clean, 'get_client_for_config', return_value=mock_client_with_pos):
+            res5 = executor_clean.execute_signal("BTC/USDT", proposal, {"action_decision": "APPROVE"})
+            self.assertFalse(res5["executed"])
+            self.assertEqual(res5["reason"], "EXCHANGE_POSITION_EXISTS")
+        if os.path.exists("storage/test_clean.db"):
+            os.remove("storage/test_clean.db")
+
+    def test_binance_attach_position_tpsl(self):
+        """Kiểm tra Binance attach_position_tpsl gửi lệnh STOP_MARKET và TAKE_PROFIT_MARKET"""
+        client = BinanceFuturesClient(api_key="k", api_secret="s", is_testnet=True)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"orderId": "998877"}
+        with patch.object(client.session, 'post', return_value=mock_resp):
+            res = client.attach_position_tpsl("BTC/USDT", "LONG", stop_loss=82500.0, take_profit=84000.0)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["sl_order_id"], "998877")
+            self.assertEqual(res["tp_order_id"], "998877")
 
 
 def run_all_tests():

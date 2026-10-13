@@ -254,6 +254,33 @@ class DatabaseManager:
         query = "SELECT * FROM executed_orders ORDER BY id DESC LIMIT ?"
         return self._execute(query, (limit,), fetch="all")
 
+    def has_active_position_or_recent_order(self, symbol: str, cooldown_minutes: int = 15) -> bool:
+        """
+        Kiểm tra xem cặp coin đã có vị thế đang mở hoặc vừa đặt lệnh gần đây (Idempotency Guard).
+        Tránh trường hợp vòng lặp quét 1 phút liên tục kích hoạt gây dồn khối lượng (spamming).
+        """
+        # 1. Kiểm tra vị thế OPEN trong active_positions
+        pos = self._execute(
+            "SELECT id FROM active_positions WHERE symbol = ? AND status = 'OPEN'",
+            (symbol,),
+            fetch="one"
+        )
+        if pos:
+            return True
+
+        # 2. Kiểm tra lệnh vừa được đặt thành công trong vòng cooldown_minutes phút
+        recent_order = self._execute(
+            """
+            SELECT id FROM executed_orders 
+            WHERE symbol = ? 
+              AND status IN ('SUBMITTED', 'FILLED', 'NEW')
+              AND datetime(created_at) >= datetime('now', ?)
+            """,
+            (symbol, f"-{cooldown_minutes} minutes"),
+            fetch="one"
+        )
+        return bool(recent_order)
+
     def record_signal(
         self,
         symbol: str,

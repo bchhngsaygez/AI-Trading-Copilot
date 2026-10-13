@@ -110,13 +110,49 @@ class OrderExecutor:
                 "message": f"Thông số lệnh không hợp lệ: Entry={entry_price}, Size={position_size}"
             }
 
+        # 5. IDEMPOTENCY GUARD 1: Kiểm tra Cooldown & Vị thế mở trong SQLite nội bộ
+        if self.db.has_active_position_or_recent_order(symbol, cooldown_minutes=15):
+            msg = f"Cặp {symbol} đã có vị thế mở hoặc vừa gửi lệnh trong 15 phút qua. Bỏ qua đặt lệnh lặp lại để chống dồn khối lượng."
+            logger.info(f"🛡️ [IDEMPOTENCY GUARD] {msg}")
+            return {
+                "executed": False,
+                "reason": "COOLDOWN_ACTIVE",
+                "message": msg
+            }
+
+        # 6. IDEMPOTENCY GUARD 2: Kiểm tra Vị thế thực tế và Lệnh chờ trực tiếp trên sàn
+        pos_on_exchange = client.get_open_position(symbol)
+        if pos_on_exchange and pos_on_exchange.get("size", 0.0) > 0:
+            msg = f"Sàn {exchange_name.upper()} đã có vị thế đang mở cho {symbol} ({pos_on_exchange.get('size')} {symbol}). Hủy trigger để chống dồn volume."
+            logger.warning(f"🛡️ [IDEMPOTENCY GUARD] {msg}")
+            self.db.log_audit_event("AUTO_TRADE_BLOCKED_EXISTING_POSITION", msg, {"symbol": symbol, "position": pos_on_exchange})
+
+            # Tự động gắn SL/TP cho vị thế hiện có nếu trước đó bị thiếu
+            if stop_loss > 0 or take_profit > 0:
+                client.attach_position_tpsl(symbol, pos_on_exchange.get("side", side), stop_loss, take_profit)
+
+            return {
+                "executed": False,
+                "reason": "EXCHANGE_POSITION_EXISTS",
+                "message": msg
+            }
+
+        if client.has_open_orders(symbol):
+            msg = f"Sàn {exchange_name.upper()} đang có lệnh chờ (Pending Limit / Stop) cho {symbol}. Hủy trigger để tránh lặp lệnh."
+            logger.warning(f"🛡️ [IDEMPOTENCY GUARD] {msg}")
+            return {
+                "executed": False,
+                "reason": "EXCHANGE_PENDING_ORDER_EXISTS",
+                "message": msg
+            }
+
         logger.info(
             f"🚀 [AUTO-TRADE EXECUTION] Bắt đầu đặt lệnh {action} {symbol} "
             f"tại ${entry_price:,.2f} | Size: {position_size} | Sàn: {exchange_name.upper()} "
             f"({'Testnet' if is_testnet else 'MAINNET REAL'})..."
         )
 
-        # 5. Gửi lệnh lên sàn qua Exchange Client
+        # 7. Gửi lệnh lên sàn qua Exchange Client
         res = client.place_order(
             symbol=symbol,
             side=side,
@@ -133,6 +169,27 @@ class OrderExecutor:
         sl_oid = res.get("sl_order_id")
         tp_oid = res.get("tp_order_id")
         err_msg = res.get("error")
+
+        # 8. Mở vị thế theo dõi trong active_positions nếu lệnh đặt thành công
+        if res.get("success") and signal_id:
+            try:
+                tp1_val = proposal.get("tp1", {}).get("price", take_profit) if isinstance(proposal.get("tp1"), dict) else take_profit
+                tp2_val = proposal.get("tp2", {}).get("price", take_profit) if isinstance(proposal.get("tp2"), dict) else take_profit
+                tp3_val = proposal.get("tp3", {}).get("price", take_profit) if isinstance(proposal.get("tp3"), dict) else take_profit
+                self.db.open_position(
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    tp1=tp1_val,
+                    tp2=tp2_val,
+                    tp3=tp3_val,
+                    position_size=position_size,
+                    risk_usd=proposal.get("risk_amount_usd", 2.0)
+                )
+            except Exception as pos_err:
+                logger.warning(f"Lỗi mở vị thế trong DB: {pos_err}")
 
         # 6. Ghi nhật ký vào SQLite Database
         exec_id = self.db.record_executed_order(
@@ -179,3 +236,20 @@ class OrderExecutor:
             "message": audit_desc,
             "raw": res
         }
+
+    def sync_active_positions_tpsl(self, symbol: str, stop_loss: float, take_profit: float):
+        """
+        Đồng bộ định kỳ: Nếu trên sàn có vị thế đang mở mà chưa gắn SL/TP,
+        tự động gắn SL/TP vào vị thế ngay để không bao giờ bị trống cột 'TP/SL for position'.
+        """
+        cfg = self.db.get_exchange_config()
+        client = self.get_client_for_config(cfg)
+        if not client:
+            return
+        try:
+            pos = client.get_open_position(symbol)
+            if pos and pos.get("size", 0.0) > 0:
+                client.attach_position_tpsl(symbol, pos.get("side", "LONG"), stop_loss, take_profit)
+        except Exception as e:
+            logger.debug(f"Lỗi sync SL/TP cho {symbol}: {e}")
+

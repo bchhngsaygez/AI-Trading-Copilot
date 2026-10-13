@@ -276,12 +276,15 @@ class TradingCopilotSystem:
         # 7. TỰ ĐỘNG ĐẶT LỆNH SÀN (AUTO-TRADE) KHI AI COPILOT APPROVE
         if ai_decision == "APPROVE":
             if self.db.is_auto_trade_enabled():
-                logger.info(f"⚡ [AUTO-TRADE]: AI APPROVE cho {symbol}! Tiến hành gửi lệnh lên sàn...")
+                logger.info(f"⚡ [AUTO-TRADE]: AI APPROVE cho {symbol}! Tiến hành kiểm tra và gửi lệnh lên sàn...")
                 exec_res = self.order_executor.execute_signal(symbol, proposal_dict, ai_result, signal_id)
-                self.dispatcher.send_auto_trade_alert(symbol, proposal_dict, exec_res)
                 if exec_res.get("executed"):
+                    self.dispatcher.send_auto_trade_alert(symbol, proposal_dict, exec_res)
                     print(f"✅ [AUTO-TRADE EXECUTED]: Đã đặt lệnh {proposal.action} {symbol} thành công trên sàn {exec_res.get('exchange', '').upper()} (Order #{exec_res.get('order_id')})!")
+                elif exec_res.get("reason") in ("EXCHANGE_POSITION_EXISTS", "COOLDOWN_ACTIVE", "EXCHANGE_PENDING_ORDER_EXISTS"):
+                    logger.info(f"🛡️ [AUTO-TRADE IDEMPOTENCY GUARD]: {exec_res.get('message')}")
                 else:
+                    self.dispatcher.send_auto_trade_alert(symbol, proposal_dict, exec_res)
                     print(f"⚠️ [AUTO-TRADE FAILED]: Đặt lệnh {symbol} thất bại: {exec_res.get('message')}")
             else:
                 logger.info(f"ℹ️ [AUTO-TRADE]: AI phê duyệt APPROVE cho {symbol} nhưng Auto-Trade đang TẮT.")
