@@ -549,8 +549,10 @@ class TestExchangeExecutionAndAutoTrade(unittest.TestCase):
         executor_clean = OrderExecutor(db_clean)
         db_clean.save_exchange_config(exchange="binance", api_key="k", api_secret="s", is_testnet=True, auto_trade_enabled=True)
         mock_client_with_pos = MagicMock()
-        mock_client_with_pos.get_open_position.return_value = {"symbol": "BTC/USDT", "size": 0.0114, "side": "LONG"}
+        mock_client_with_pos.get_open_position.return_value = {"symbol": "BTC/USDT", "size": 0.0114, "side": "LONG", "mark_price": 83000.0}
         mock_client_with_pos.has_open_orders.return_value = False
+        mock_client_with_pos.get_open_orders.return_value = []
+        mock_client_with_pos.attach_position_tpsl.return_value = {"success": True, "sl_order_id": "sl_1", "tp_order_id": "tp_1"}
         with patch.object(executor_clean, 'get_client_for_config', return_value=mock_client_with_pos):
             res5 = executor_clean.execute_signal("BTC/USDT", proposal, {"action_decision": "APPROVE"})
             self.assertFalse(res5["executed"])
@@ -558,17 +560,55 @@ class TestExchangeExecutionAndAutoTrade(unittest.TestCase):
         if os.path.exists("storage/test_clean.db"):
             os.remove("storage/test_clean.db")
 
+    def test_precision_tick_and_step_size(self):
+        """Kiểm tra độ chính xác tick size (BTC 1 decimal, ETH/SOL 2 decimals)"""
+        from execution.exchange_client import format_symbol_price, format_symbol_quantity
+        # BTC Futures tickSize là 0.10 -> tối đa 1 số thập phân
+        self.assertEqual(format_symbol_price("BTCUSDT", 82945.69), 82945.7)
+        self.assertEqual(format_symbol_price("BTC/USDT", 83000.04), 83000.0)
+        # ETH Futures tickSize là 0.01 -> 2 số thập phân
+        self.assertEqual(format_symbol_price("ETHUSDT", 2540.556), 2540.56)
+        # Step size khối lượng
+        self.assertEqual(format_symbol_quantity("BTCUSDT", 0.01145), 0.011)
+        self.assertEqual(format_symbol_quantity("SOLUSDT", 1.258), 1.26)
+
     def test_binance_attach_position_tpsl(self):
         """Kiểm tra Binance attach_position_tpsl gửi lệnh STOP_MARKET và TAKE_PROFIT_MARKET"""
         client = BinanceFuturesClient(api_key="k", api_secret="s", is_testnet=True)
         mock_resp = MagicMock()
         mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
         mock_resp.json.return_value = {"orderId": "998877"}
-        with patch.object(client.session, 'post', return_value=mock_resp):
-            res = client.attach_position_tpsl("BTC/USDT", "LONG", stop_loss=82500.0, take_profit=84000.0)
-            self.assertTrue(res["success"])
-            self.assertEqual(res["sl_order_id"], "998877")
-            self.assertEqual(res["tp_order_id"], "998877")
+        with patch.object(client, '_signed_request', return_value=mock_resp):
+            with patch.object(client, 'get_open_position', return_value={"symbol": "BTC/USDT", "size": 0.01, "side": "LONG", "mark_price": 83000.0}):
+                res = client.attach_position_tpsl("BTC/USDT", "LONG", stop_loss=82500.0, take_profit=84000.0)
+                self.assertTrue(res["success"])
+                self.assertEqual(res["sl_order_id"], "998877")
+                self.assertEqual(res["tp_order_id"], "998877")
+
+    def test_ensure_position_tpsl_protection(self):
+        """Kiểm tra ensure_position_tpsl_protection tự động gắn TP/SL khi phát hiện vị thế thiếu bảo vệ"""
+        mock_client = MagicMock()
+        mock_client.get_open_position.return_value = {
+            "symbol": "BTC/USDT",
+            "size": 0.0114,
+            "side": "LONG",
+            "entry_price": 83000.0,
+            "mark_price": 83100.0
+        }
+        # Chưa có lệnh điều kiện nào trên sàn
+        mock_client.get_open_orders.return_value = []
+        mock_client.attach_position_tpsl.return_value = {
+            "success": True,
+            "sl_order_id": "sl_888",
+            "tp_order_id": "tp_888"
+        }
+        with patch.object(self.executor, 'get_client_for_config', return_value=mock_client):
+            prot_res = self.executor.ensure_position_tpsl_protection("BTC/USDT")
+            self.assertTrue(prot_res["success"])
+            self.assertTrue(prot_res["protected"])
+            self.assertEqual(prot_res["sl_order_id"], "sl_888")
+            self.assertEqual(prot_res["tp_order_id"], "tp_888")
 
 
 def run_all_tests():

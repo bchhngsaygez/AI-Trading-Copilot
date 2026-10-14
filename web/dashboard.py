@@ -123,6 +123,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
           💰 Sửa Vốn
         </button>
+        <!-- NÚT GẮN & ĐỒNG BỘ TP/SL SÀN -->
+        <button id="btn-sync-tpsl" onclick="syncExchangeTPSL()" class="px-3.5 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-blue-500/10 active:scale-95" title="Đồng bộ và kích hoạt Position TP/SL trực tiếp lên sàn Binance / Bybit">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+          ⚡ Gắn TP/SL Sàn
+        </button>
         <button onclick="openPineModal()" class="px-3.5 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-medium text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-blue-500/10">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
           📜 Pine Script v6
@@ -1054,6 +1059,42 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
+    async function syncExchangeTPSL() {
+      const btn = document.getElementById('btn-sync-tpsl');
+      const originalText = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-white inline" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg> Đang gắn TP/SL...`;
+      }
+
+      try {
+        const res = await fetch('/api/exchange/sync-tpsl', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'SUCCESS') {
+          let details = [];
+          for (const [sym, r] of Object.entries(data.results || {})) {
+            if (r.has_position) {
+              details.push(`${sym}: ${r.message}`);
+            }
+          }
+          if (details.length === 0) {
+            alert("✓ Kiểm tra hoàn tất: Hiện tại không có vị thế mở nào cần gắn bổ sung TP/SL.");
+          } else {
+            alert("✓ Kết Quả Gắn TP/SL Trên Sàn:\n\n" + details.join("\n"));
+          }
+        } else {
+          alert("✕ Lỗi khi đồng bộ TP/SL: " + (data.message || "Không xác định"));
+        }
+      } catch (err) {
+        alert("✕ Lỗi kết nối khi gửi yêu cầu gắn TP/SL: " + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalText;
+        }
+      }
+    }
+
     async function fetchChartData() {
       try {
         const res = await fetch(`/api/chart-data?symbol=${encodeURIComponent(activeSymbol)}`);
@@ -1654,6 +1695,25 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(json.dumps(res, default=str).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
+        elif url.path == "/api/exchange/sync-tpsl":
+            try:
+                db = DatabaseManager(self.db_path)
+                executor = OrderExecutor(db=db)
+                symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+                results = {}
+                for sym in symbols:
+                    results[sym] = executor.ensure_position_tpsl_protection(sym)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "SUCCESS", "results": results}, default=str).encode("utf-8"))
             except Exception as e:
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json; charset=utf-8")

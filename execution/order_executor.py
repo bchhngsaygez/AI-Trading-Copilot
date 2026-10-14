@@ -114,6 +114,8 @@ class OrderExecutor:
         if self.db.has_active_position_or_recent_order(symbol, cooldown_minutes=15):
             msg = f"Cặp {symbol} đã có vị thế mở hoặc vừa gửi lệnh trong 15 phút qua. Bỏ qua đặt lệnh lặp lại để chống dồn khối lượng."
             logger.info(f"🛡️ [IDEMPOTENCY GUARD] {msg}")
+            # Luôn kiểm tra và bảo đảm vị thế trên sàn phải có TP/SL
+            self.ensure_position_tpsl_protection(symbol, target_sl=stop_loss, target_tp=take_profit)
             return {
                 "executed": False,
                 "reason": "COOLDOWN_ACTIVE",
@@ -128,8 +130,7 @@ class OrderExecutor:
             self.db.log_audit_event("AUTO_TRADE_BLOCKED_EXISTING_POSITION", msg, {"symbol": symbol, "position": pos_on_exchange})
 
             # Tự động gắn SL/TP cho vị thế hiện có nếu trước đó bị thiếu
-            if stop_loss > 0 or take_profit > 0:
-                client.attach_position_tpsl(symbol, pos_on_exchange.get("side", side), stop_loss, take_profit)
+            self.ensure_position_tpsl_protection(symbol, target_sl=stop_loss, target_tp=take_profit)
 
             return {
                 "executed": False,
@@ -191,7 +192,10 @@ class OrderExecutor:
             except Exception as pos_err:
                 logger.warning(f"Lỗi mở vị thế trong DB: {pos_err}")
 
-        # 6. Ghi nhật ký vào SQLite Database
+            # Đảm bảo TP/SL được kích hoạt nếu vị thế đã khớp
+            self.ensure_position_tpsl_protection(symbol, target_sl=stop_loss, target_tp=take_profit)
+
+        # 9. Ghi nhật ký vào SQLite Database
         exec_id = self.db.record_executed_order(
             signal_id=signal_id,
             exchange=exchange_name,
@@ -210,7 +214,7 @@ class OrderExecutor:
             raw_response=res
         )
 
-        # 7. Ghi sự kiện kiểm toán (Audit Log)
+        # 10. Ghi sự kiện kiểm toán (Audit Log)
         audit_desc = (
             f"Tự động đặt lệnh thành công: {side} {symbol} tại ${entry_price:,.2f} (Order #{order_id})"
             if res.get("success")
@@ -237,19 +241,106 @@ class OrderExecutor:
             "raw": res
         }
 
-    def sync_active_positions_tpsl(self, symbol: str, stop_loss: float, take_profit: float):
+    def ensure_position_tpsl_protection(
+        self,
+        symbol: str,
+        target_sl: Optional[float] = None,
+        target_tp: Optional[float] = None
+    ) -> Dict[str, Any]:
         """
-        Đồng bộ định kỳ: Nếu trên sàn có vị thế đang mở mà chưa gắn SL/TP,
-        tự động gắn SL/TP vào vị thế ngay để không bao giờ bị trống cột 'TP/SL for position'.
+        Rà soát và đảm bảo vị thế đang mở trên sàn (Binance / Bybit) phải có TP/SL.
+        Nếu phát hiện vị thế đang mở mà chưa có TP/SL (hoặc bị thiếu):
+        Tự động lấy mức SL/TP từ DB (hoặc target truyền vào) và gọi attach_position_tpsl để kích hoạt cột 'TP/SL for position'.
         """
         cfg = self.db.get_exchange_config()
         client = self.get_client_for_config(cfg)
         if not client:
-            return
+            return {"success": False, "message": "Chưa cấu hình API Key sàn"}
+
         try:
             pos = client.get_open_position(symbol)
-            if pos and pos.get("size", 0.0) > 0:
-                client.attach_position_tpsl(symbol, pos.get("side", "LONG"), stop_loss, take_profit)
+            if not pos or pos.get("size", 0.0) <= 0:
+                return {"success": True, "has_position": False, "message": f"Không có vị thế mở trên sàn cho {symbol}"}
+
+            side = pos.get("side", "LONG")
+            pos_side = pos.get("position_side", "BOTH")
+            entry_price = float(pos.get("entry_price", 0.0))
+            pos_size = float(pos.get("size", 0.0))
+
+            # Kiểm tra xem trên sàn đã có lệnh STOP_MARKET và TAKE_PROFIT_MARKET chưa
+            open_orders = client.get_open_orders(symbol)
+            has_sl = any(o.get("type") in ("STOP_MARKET", "STOP") for o in open_orders)
+            has_tp = any(o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT") for o in open_orders)
+
+            if has_sl and has_tp and not target_sl and not target_tp:
+                return {
+                    "success": True,
+                    "has_position": True,
+                    "already_protected": True,
+                    "message": f"Vị thế {symbol} ({side} {pos_size}) đã có đủ cả TP và SL trên sàn."
+                }
+
+            # Xác định mức giá SL và TP cần gắn
+            sl = target_sl
+            tp = target_tp
+
+            # Nếu chưa có, tìm trong active_positions của SQLite nội bộ
+            if not sl or not tp:
+                active_pos = self.db.get_active_positions()
+                matched = next((p for p in active_pos if p.get("symbol") == symbol and p.get("status") == "OPEN"), None)
+                if matched:
+                    sl = sl or matched.get("stop_loss")
+                    tp = tp or matched.get("tp1") or matched.get("tp2")
+
+            # Nếu vẫn chưa có SL/TP (ví dụ đặt thủ công), tính toán an toàn theo %
+            is_btc = "BTC" in symbol.replace("/", "").upper()
+            dec = 1 if is_btc else 2
+            if not sl:
+                sl = round(entry_price * 0.985, dec) if side == "LONG" else round(entry_price * 1.015, dec)
+            if not tp:
+                tp = round(entry_price * 1.03, dec) if side == "LONG" else round(entry_price * 0.97, dec)
+
+            logger.info(f"⚡ [AUTO-PROTECT] Tiến hành gắn TP/SL cho vị thế {symbol} ({side} {pos_size}): SL={sl}, TP={tp}")
+            attach_res = client.attach_position_tpsl(
+                symbol=symbol,
+                side=side,
+                stop_loss=sl,
+                take_profit=tp,
+                position_side=pos_side
+            )
+
+            if attach_res.get("success"):
+                msg = f"Đã gắn thành công Position TP/SL cho {symbol} ({side} {pos_size}) trên sàn {cfg.get('exchange', '').upper()}!"
+                logger.info(f"✅ {msg}")
+                self.db.log_audit_event("AUTO_PROTECT_TPSL_ATTACHED", msg, {
+                    "symbol": symbol,
+                    "side": side,
+                    "sl": sl,
+                    "tp": tp,
+                    "details": attach_res
+                })
+                return {
+                    "success": True,
+                    "has_position": True,
+                    "protected": True,
+                    "sl_order_id": attach_res.get("sl_order_id"),
+                    "tp_order_id": attach_res.get("tp_order_id"),
+                    "message": msg
+                }
+            else:
+                err_msg = f"Không thể gắn TP/SL cho {symbol}: {attach_res.get('errors')}"
+                logger.warning(f"⚠️ {err_msg}")
+                return {
+                    "success": False,
+                    "has_position": True,
+                    "message": err_msg,
+                    "errors": attach_res.get("errors")
+                }
         except Exception as e:
-            logger.debug(f"Lỗi sync SL/TP cho {symbol}: {e}")
+            logger.error(f"Lỗi khi bảo vệ TP/SL cho {symbol}: {e}")
+            return {"success": False, "message": str(e)}
+
+    def sync_active_positions_tpsl(self, symbol: str, stop_loss: float, take_profit: float):
+        """Đồng bộ định kỳ alias cho ensure_position_tpsl_protection"""
+        return self.ensure_position_tpsl_protection(symbol, target_sl=stop_loss, target_tp=take_profit)
 

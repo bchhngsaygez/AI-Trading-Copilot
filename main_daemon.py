@@ -324,6 +324,16 @@ class TradingCopilotSystem:
             if be_updates:
                 for u in be_updates:
                     print(f"⚡ [BREAKEVEN AUTO-TRIGGER]: Đã đôn SL về Entry cho {u['symbol']} {u['side']} tại ${u['entry']:,.2f}!")
+                    if self.db.is_auto_trade_enabled():
+                        self.order_executor.ensure_position_tpsl_protection(u['symbol'], target_sl=u['entry'])
+
+        # Tự động rà soát & gắn TP/SL bảo vệ cho tất cả vị thế đang mở trên sàn (TP/SL for position)
+        if self.db.is_auto_trade_enabled():
+            for sym in symbols:
+                try:
+                    self.order_executor.ensure_position_tpsl_protection(sym)
+                except Exception as prot_err:
+                    logger.debug(f"Lỗi rà soát bảo vệ TP/SL {sym}: {prot_err}")
 
         # Quét và phân tích từng cặp
         for sym in symbols:
