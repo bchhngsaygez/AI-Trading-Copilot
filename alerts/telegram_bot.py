@@ -227,6 +227,32 @@ class AlertDispatcher:
 
         return self.send_message(msg)
 
+    def send_breakeven_alert(
+        self,
+        symbol: str,
+        side: str,
+        entry: float,
+        current_price: float,
+        sl_order_id: str = "N/A",
+        r_multiple: float = 1.0
+    ) -> bool:
+        """Bắn thông báo khi vị thế đạt +1.0R và tự động dời SL về hòa vốn (Zero Risk)"""
+        if not self.telegram_enabled:
+            return False
+
+        msg = (
+            f"🛡️ <b>[BREAKEVEN ĐÃ KÍCH HOẠT - ZERO RISK]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 <b>Cặp Coin:</b> <code>{symbol}</code> (<b>{side}</b>)\n"
+            f"📈 <b>Lợi Nhuận:</b> Đạt <b>+{r_multiple:.1f}R</b> (Giá hiện tại: <code>${current_price:,.2f}</code>)\n"
+            f"💰 <b>Giá Entry Hòa Vốn:</b> <code>${entry:,.2f}</code>\n"
+            f"🛑 <b>Stop Loss Mới:</b> <code>${entry:,.2f}</code> (Order #{sl_order_id})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✨ <b>Bảo Toàn Vốn 100%:</b> Stop Loss trên sàn đã được dời về đúng giá Entry.\n"
+            f"Nếu thị trường bất ngờ đảo chiều (quay xe), lệnh sẽ tự động đóng ở mức hòa vốn (<b>$0 loss</b>) thay vì dính Stop Loss âm!"
+        )
+        return self.send_message(msg)
+
     def poll_telegram_updates(self, db, order_executor=None):
         """
         Lắng nghe và xử lý các lệnh điều khiển từ người dùng qua Telegram Bot:

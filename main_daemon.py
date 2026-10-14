@@ -316,16 +316,33 @@ class TradingCopilotSystem:
         logger.info(f"Bắt đầu đồng bộ nến từ sàn Binance cho {len(symbols)} cặp...")
         self.data_feed.sync_buffers(symbols=symbols, timeframes=["15m", "1h"])
 
-        # Rà soát Breakeven cho các vị thế đang mở
+        # Rà soát Breakeven cho các vị thế đang mở khi đạt lợi nhuận >= +1.0R
         current_prices = {s: self.data_feed.get_current_price(s) for s in symbols}
         valid_prices = {k: v for k, v in current_prices.items() if v is not None}
         if valid_prices:
             be_updates = self.guardrails.check_and_update_breakeven(valid_prices)
             if be_updates:
                 for u in be_updates:
-                    print(f"⚡ [BREAKEVEN AUTO-TRIGGER]: Đã đôn SL về Entry cho {u['symbol']} {u['side']} tại ${u['entry']:,.2f}!")
+                    r_mult = u.get("r_multiple", 1.0)
+                    sl_oid = "N/A"
+                    print(f"🛡️ [BREAKEVEN AUTO-TRIGGER]: Vị thế {u['symbol']} {u['side']} đã đạt +{r_mult}R tại ${u['current_price']:,.2f}! Đang dời SL về đúng giá Entry ${u['entry']:,.2f}...")
                     if self.db.is_auto_trade_enabled():
-                        self.order_executor.ensure_position_tpsl_protection(u['symbol'], target_sl=u['entry'])
+                        be_res = self.order_executor.move_stop_loss_to_breakeven(u['symbol'], u['entry'])
+                        sl_oid = be_res.get("sl_order_id", "N/A")
+                        if be_res.get("success"):
+                            print(f"✅ [BREAKEVEN EXECUTED]: Đã dời Stop Loss trên sàn thành công về Entry ${u['entry']:,.2f} (Order #{sl_oid})!")
+                        else:
+                            print(f"⚠️ [BREAKEVEN FAILED]: Chưa thể dời SL trên sàn: {be_res.get('message')}")
+
+                    # Gửi cảnh báo Telegram Breakeven bảo toàn vốn
+                    self.dispatcher.send_breakeven_alert(
+                        symbol=u['symbol'],
+                        side=u['side'],
+                        entry=u['entry'],
+                        current_price=u['current_price'],
+                        sl_order_id=sl_oid,
+                        r_multiple=r_mult
+                    )
 
         # Tự động rà soát & gắn TP/SL bảo vệ cho tất cả vị thế đang mở trên sàn (TP/SL for position)
         if self.db.is_auto_trade_enabled():

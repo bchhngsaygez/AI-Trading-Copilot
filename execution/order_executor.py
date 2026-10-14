@@ -285,9 +285,9 @@ class OrderExecutor:
             tp = target_tp
 
             # Nếu chưa có, tìm trong active_positions của SQLite nội bộ
+            active_pos = self.db.get_active_positions()
+            matched = next((p for p in active_pos if p.get("symbol") == symbol and p.get("status") == "OPEN"), None)
             if not sl or not tp:
-                active_pos = self.db.get_active_positions()
-                matched = next((p for p in active_pos if p.get("symbol") == symbol and p.get("status") == "OPEN"), None)
                 if matched:
                     sl = sl or matched.get("stop_loss")
                     tp = tp or matched.get("tp1") or matched.get("tp2")
@@ -299,6 +299,24 @@ class OrderExecutor:
                 sl = round(entry_price * 0.985, dec) if side == "LONG" else round(entry_price * 1.015, dec)
             if not tp:
                 tp = round(entry_price * 1.03, dec) if side == "LONG" else round(entry_price * 0.97, dec)
+
+            # Đồng bộ vị thế vào active_positions nếu chưa có để theo dõi Breakeven
+            if not matched:
+                try:
+                    self.db.open_position(
+                        signal_id=None,
+                        symbol=symbol,
+                        side=side,
+                        entry_price=entry_price,
+                        stop_loss=sl,
+                        tp1=tp,
+                        tp2=tp,
+                        tp3=tp,
+                        position_size=pos_size,
+                        risk_usd=round(pos_size * abs(entry_price - sl), 2)
+                    )
+                except Exception as open_err:
+                    logger.debug(f"Không thể tự động đồng bộ vị thế vào DB: {open_err}")
 
             logger.info(f"⚡ [AUTO-PROTECT] Tiến hành gắn TP/SL cho vị thế {symbol} ({side} {pos_size}): SL={sl}, TP={tp}")
             attach_res = client.attach_position_tpsl(
@@ -317,7 +335,8 @@ class OrderExecutor:
                     "side": side,
                     "sl": sl,
                     "tp": tp,
-                    "details": attach_res
+                    "sl_order_id": str(attach_res.get("sl_order_id")),
+                    "tp_order_id": str(attach_res.get("tp_order_id"))
                 })
                 return {
                     "success": True,
@@ -338,6 +357,77 @@ class OrderExecutor:
                 }
         except Exception as e:
             logger.error(f"Lỗi khi bảo vệ TP/SL cho {symbol}: {e}")
+            return {"success": False, "message": str(e)}
+
+    def move_stop_loss_to_breakeven(self, symbol: str, entry_price: float) -> Dict[str, Any]:
+        """
+        Dời Stop Loss trên sàn giao dịch về đúng giá Entry (Hòa vốn / Zero Risk).
+        Giữ nguyên Take Profit hiện tại của vị thế.
+        """
+        cfg = self.db.get_exchange_config()
+        client = self.get_client_for_config(cfg)
+        if not client:
+            return {"success": False, "message": "Chưa cấu hình API Key sàn"}
+
+        try:
+            pos = client.get_open_position(symbol)
+            if not pos or pos.get("size", 0.0) <= 0:
+                return {"success": False, "message": f"Không có vị thế mở trên sàn cho {symbol}"}
+
+            side = pos.get("side", "LONG")
+            pos_side = pos.get("position_side", "BOTH")
+            pos_size = float(pos.get("size", 0.0))
+
+            # Tìm Take Profit hiện tại từ lệnh chờ trên sàn để không làm mất TP
+            open_orders = client.get_open_orders(symbol)
+            tp_price = None
+            for o in open_orders:
+                if isinstance(o, dict) and o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
+                    tp_price = float(o.get("stopPrice", 0.0))
+                    break
+
+            if not tp_price:
+                active_pos = self.db.get_active_positions()
+                matched = next((p for p in active_pos if p.get("symbol") == symbol and p.get("status") == "OPEN"), None)
+                if matched:
+                    tp_price = matched.get("tp1") or matched.get("tp2")
+
+            # Gắn lại SL = entry_price và giữ nguyên TP
+            logger.info(f"🛡️ [BREAKEVEN ON-EXCHANGE] Dời SL về Entry ${entry_price:,.2f} cho {symbol} ({side} {pos_size})...")
+            attach_res = client.attach_position_tpsl(
+                symbol=symbol,
+                side=side,
+                stop_loss=entry_price,
+                take_profit=tp_price,
+                position_side=pos_side
+            )
+
+            if attach_res.get("success"):
+                msg = f"Đã dời SL về hòa vốn ${entry_price:,.2f} thành công cho {symbol} trên sàn {cfg.get('exchange', '').upper()} (Order #{attach_res.get('sl_order_id')})!"
+                logger.info(f"✅ {msg}")
+                self.db.log_audit_event("BREAKEVEN_STOP_LOSS_UPDATED_ON_EXCHANGE", msg, {
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "tp_price": tp_price,
+                    "sl_order_id": str(attach_res.get("sl_order_id")),
+                    "tp_order_id": str(attach_res.get("tp_order_id"))
+                })
+                return {
+                    "success": True,
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "sl_order_id": attach_res.get("sl_order_id"),
+                    "tp_order_id": attach_res.get("tp_order_id"),
+                    "message": msg
+                }
+            else:
+                err_msg = f"Lỗi dời SL về Breakeven cho {symbol}: {attach_res.get('errors')}"
+                logger.warning(f"⚠️ {err_msg}")
+                return {"success": False, "message": err_msg}
+        except Exception as e:
+            logger.error(f"Lỗi khi dời SL về Breakeven cho {symbol}: {e}")
             return {"success": False, "message": str(e)}
 
     def sync_active_positions_tpsl(self, symbol: str, stop_loss: float, take_profit: float):

@@ -118,26 +118,39 @@ class RiskGuardrails:
             if not curr_price:
                 continue
 
-            # Tính khoảng cách 1.0R theo giá
+            # Tính khoảng cách 1.0R theo giá (khoảng cách rủi ro ban đầu)
             r_distance = abs(entry - orig_sl)
+            if r_distance <= 0:
+                # Nếu không có orig_sl hợp lệ, giả định mặc định 1.5% theo ATR
+                r_distance = entry * 0.015
 
             achieved_breakeven = False
+            r_multiple = 0.0
             if side == "LONG":
                 # Lãi khi giá vượt Entry + 1.0R
-                if curr_price >= (entry + r_distance):
+                r_multiple = round((curr_price - entry) / r_distance, 2)
+                if r_multiple >= 1.0:
                     achieved_breakeven = True
             elif side == "SHORT":
                 # Lãi khi giá giảm dưới Entry - 1.0R
-                if curr_price <= (entry - r_distance):
+                r_multiple = round((entry - curr_price) / r_distance, 2)
+                if r_multiple >= 1.0:
                     achieved_breakeven = True
 
             if achieved_breakeven:
-                logger.info(f"Đạt mốc 1.0R cho {symbol} {side}! Tự động đôn SL từ {curr_sl} về Entry {entry} (Risk-Free).")
+                logger.info(f"⚡ [BREAKEVEN] Đạt mốc +{r_multiple}R (>= 1.0R) cho {symbol} {side}! Tự động đôn SL từ {curr_sl} về Entry {entry} (Risk-Free).")
                 self.db.update_position_sl_to_breakeven(pos_id, entry)
                 self.db.log_audit_event(
                     "RISK_FREE_BREAKEVEN",
-                    f"Đôn SL về Entry {entry} cho {symbol} {side} khi giá đạt {curr_price}.",
-                    {"position_id": pos_id, "symbol": symbol, "entry": entry, "current_price": curr_price}
+                    f"Đôn SL về Entry {entry} cho {symbol} {side} khi giá đạt {curr_price} (+{r_multiple}R).",
+                    {
+                        "position_id": pos_id,
+                        "symbol": symbol,
+                        "entry": entry,
+                        "current_price": curr_price,
+                        "r_multiple": r_multiple,
+                        "r_distance": r_distance
+                    }
                 )
                 updates.append({
                     "position_id": pos_id,
@@ -145,6 +158,8 @@ class RiskGuardrails:
                     "side": side,
                     "entry": entry,
                     "current_price": curr_price,
+                    "r_distance": r_distance,
+                    "r_multiple": r_multiple,
                     "status": "SL_MOVED_TO_BREAKEVEN"
                 })
 

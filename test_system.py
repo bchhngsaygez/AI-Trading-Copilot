@@ -610,6 +610,60 @@ class TestExchangeExecutionAndAutoTrade(unittest.TestCase):
             self.assertEqual(prot_res["sl_order_id"], "sl_888")
             self.assertEqual(prot_res["tp_order_id"], "tp_888")
 
+    def test_move_stop_loss_to_breakeven(self):
+        """Kiểm tra move_stop_loss_to_breakeven dời SL về đúng Entry và giữ nguyên Take Profit"""
+        mock_client = MagicMock()
+        mock_client.get_open_position.return_value = {
+            "symbol": "BTC/USDT",
+            "size": 0.0114,
+            "side": "LONG",
+            "entry_price": 83491.40,
+            "mark_price": 84100.0
+        }
+        # Đang có Take Profit ở 84500.0
+        mock_client.get_open_orders.return_value = [
+            {"type": "TAKE_PROFIT_MARKET", "stopPrice": "84500.0"}
+        ]
+        mock_client.attach_position_tpsl.return_value = {
+            "success": True,
+            "sl_order_id": "sl_be_123",
+            "tp_order_id": "tp_be_123"
+        }
+        with patch.object(self.executor, 'get_client_for_config', return_value=mock_client):
+            res = self.executor.move_stop_loss_to_breakeven("BTC/USDT", entry_price=83491.40)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["entry_price"], 83491.40)
+            self.assertEqual(res["sl_order_id"], "sl_be_123")
+            # Kiểm tra attach_position_tpsl được gọi với stop_loss=entry_price (83491.40) và giữ nguyên TP 84500.0
+            mock_client.attach_position_tpsl.assert_called_once_with(
+                symbol="BTC/USDT",
+                side="LONG",
+                stop_loss=83491.40,
+                take_profit=84500.0,
+                position_side="BOTH"
+            )
+
+    def test_telegram_breakeven_alert_formatting(self):
+        """Kiểm tra định dạng tin nhắn Telegram cảnh báo Breakeven (+1.0R)"""
+        from alerts.telegram_bot import AlertDispatcher
+        dispatcher = AlertDispatcher(bot_token="test_token", chat_id="12345", telegram_enabled=True)
+        with patch.object(dispatcher, 'send_message', return_value=True) as mock_send:
+            ok = dispatcher.send_breakeven_alert(
+                symbol="BTC/USDT",
+                side="LONG",
+                entry=83491.40,
+                current_price=84050.00,
+                sl_order_id="sl_9999",
+                r_multiple=1.1
+            )
+            self.assertTrue(ok)
+            mock_send.assert_called_once()
+            msg_content = mock_send.call_args[0][0]
+            self.assertIn("BREAKEVEN ĐÃ KÍCH HOẠT", msg_content)
+            self.assertIn("$83,491.40", msg_content)
+            self.assertIn("+1.1R", msg_content)
+            self.assertIn("$0 loss", msg_content)
+
 
 def run_all_tests():
     suite = unittest.TestSuite()

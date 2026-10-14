@@ -1720,6 +1720,46 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
 
+        elif url.path == "/api/exchange/breakeven":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                post_data = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+                body = json.loads(post_data) if post_data else {}
+
+                symbol = body.get("symbol", "BTC/USDT")
+                db = DatabaseManager(self.db_path)
+                executor = OrderExecutor(db=db)
+
+                # Tìm entry price từ active_positions hoặc lấy từ sàn
+                active_pos = db.get_active_positions()
+                matched = next((p for p in active_pos if p.get("symbol") == symbol and p.get("status") == "OPEN"), None)
+                entry_price = float(matched.get("entry_price", 0.0)) if matched else 0.0
+
+                if entry_price <= 0:
+                    cfg = db.get_exchange_config()
+                    client = executor.get_client_for_config(cfg)
+                    if client:
+                        p = client.get_open_position(symbol)
+                        if p:
+                            entry_price = float(p.get("entry_price", 0.0))
+
+                if entry_price <= 0:
+                    res = {"success": False, "message": f"Không tìm thấy vị thế mở hoặc giá Entry cho {symbol}"}
+                else:
+                    res = executor.move_stop_loss_to_breakeven(symbol, entry_price)
+                    if matched and res.get("success"):
+                        db.update_position_sl_to_breakeven(matched["id"], entry_price)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(res, default=str).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ERROR", "message": str(e)}).encode("utf-8"))
+
         elif url.path == "/api/webhook/tradingview":
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
